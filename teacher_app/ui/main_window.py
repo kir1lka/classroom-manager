@@ -834,7 +834,7 @@ class TeacherMainWindow(QMainWindow):
         dlg = RemoteControlDialog(self.server, session, self)
         dlg.finished.connect(lambda _r, cid=client_id: self.remote_dialogs.pop(cid, None))
         self.remote_dialogs[client_id] = dlg
-        dlg.show()
+        dlg.showMaximized()
 
     def _handle_card_action(self, client_id: str, action: str) -> None:
         if action == "control":

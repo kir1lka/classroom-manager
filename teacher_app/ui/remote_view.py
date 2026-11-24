@@ -249,8 +249,14 @@ class RemoteControlDialog(QDialog):
         super().__init__(parent)
         self.server = server
         self.client_id = session.client_id
+        self.setWindowFlags(
+            Qt.WindowType.Window
+            | Qt.WindowType.WindowMinimizeButtonHint
+            | Qt.WindowType.WindowMaximizeButtonHint
+            | Qt.WindowType.WindowCloseButtonHint
+        )
         self.setWindowTitle(f"Управление ПК — {session.label} ({session.ip})")
-        self.resize(1220, 740)
+        self.resize(1280, 760)
 
         layout = QVBoxLayout(self)
         layout.setSpacing(10)
@@ -306,6 +312,10 @@ class RemoteControlDialog(QDialog):
         shutdown_btn.setProperty("accent", "danger")
         shutdown_btn.clicked.connect(lambda: self._confirm_power("shutdown", "Выключить этот ПК?"))
 
+        self.fullscreen_btn = QPushButton("Во весь экран")
+        self.fullscreen_btn.setCheckable(True)
+        self.fullscreen_btn.toggled.connect(self._toggle_fullscreen)
+
         bar.addWidget(self.control_btn)
         bar.addSpacing(6)
         bar.addWidget(QLabel("Экран:"))
@@ -313,6 +323,7 @@ class RemoteControlDialog(QDialog):
         bar.addWidget(QLabel("Качество:"))
         bar.addWidget(self.quality_combo)
         bar.addStretch()
+        bar.addWidget(self.fullscreen_btn)
         bar.addWidget(lock_btn)
         bar.addWidget(unlock_btn)
         bar.addWidget(lock_os_btn)
@@ -354,6 +365,14 @@ class RemoteControlDialog(QDialog):
                 monitor=mon_idx,
             )
         )
+
+    def _toggle_fullscreen(self, checked: bool) -> None:
+        if checked:
+            self.fullscreen_btn.setText("Оконный режим")
+            self.showFullScreen()
+        else:
+            self.fullscreen_btn.setText("Во весь экран")
+            self.showMaximized()
 
     def _toggle_control(self, checked: bool) -> None:
         self.canvas.set_control_enabled(checked)
