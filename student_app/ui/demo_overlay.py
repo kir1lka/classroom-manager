@@ -25,17 +25,17 @@ class DemoViewerOverlay(QWidget):
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Compact top banner
+        # Compact top banner (Spotify charcoal style)
         banner = QWidget()
         banner.setFixedHeight(36)
-        banner.setStyleSheet("background-color: #1e293b; border-bottom: 1px solid #334155;")
+        banner.setStyleSheet("background-color: #121212; border-bottom: 1px solid #282828;")
         b_layout = QHBoxLayout(banner)
         b_layout.setContentsMargins(14, 0, 14, 0)
 
         self.banner_lbl = QLabel("Демонстрация экрана учителя")
-        self.banner_lbl.setStyleSheet("color: #38bdf8; font-weight: 700; font-size: 13px; background: transparent;")
-        self.hint_lbl = QLabel(f"Идёт трансляция • Локальный выход для учителя: {hotkey_hint}")
-        self.hint_lbl.setStyleSheet("color: #94a3b8; font-size: 11px; background: transparent;")
+        self.banner_lbl.setStyleSheet("color: #FFFFFF; font-weight: 700; font-size: 13px; background: transparent;")
+        self.hint_lbl = QLabel(f"Трансляция HD • {hotkey_hint}")
+        self.hint_lbl.setStyleSheet("color: #A3A3A3; font-size: 11px; background: transparent;")
 
         b_layout.addWidget(self.banner_lbl)
         b_layout.addStretch()

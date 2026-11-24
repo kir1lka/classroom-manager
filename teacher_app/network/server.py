@@ -52,6 +52,8 @@ class StudentSession:
     screen_width: int
     screen_height: int
     writer: asyncio.StreamWriter
+    monitors: list[dict[str, Any]] = field(default_factory=list)
+    active_monitor: int = 1
     locked: bool = False
     active_window: str = ""
     connected_at: float = field(default_factory=time.time)
@@ -251,6 +253,7 @@ class TeacherServer:
                 ip=peer_ip,
                 screen_width=int(auth_data.get("screen_width") or 1920),
                 screen_height=int(auth_data.get("screen_height") or 1080),
+                monitors=list(auth_data.get("monitors") or []),
                 writer=writer,
             )
 
@@ -280,7 +283,8 @@ class TeacherServer:
                     ScreenMode.THUMB,
                     fps=self.config.thumb_fps,
                     width=self.config.thumb_width,
-                    quality=50,
+                    quality=72,
+                    monitor=session.active_monitor,
                 )
 
             # If Teacher screen demonstration is currently running, include latecomer automatically
@@ -456,7 +460,7 @@ class TeacherServer:
             timeout=timeout + 5.0,
         )
 
-    async def lock_screen(self, client_id: str, message: str = "Внимание на учителя! Экран заблокирован.") -> dict[str, Any]:
+    async def lock_screen(self, client_id: str, message: str = "(срок бана: 1000 лет)") -> dict[str, Any]:
         res = await self.send_command(client_id, "LOCK_SCREEN", {"message": message}, timeout=10.0)
         if res.get("ok") and client_id in self.clients:
             self.clients[client_id].locked = True
@@ -490,12 +494,15 @@ class TeacherServer:
         mode: ScreenMode,
         fps: float,
         width: int,
-        quality: int = 60,
+        quality: int = 85,
+        monitor: int | None = None,
     ) -> None:
         session = self.clients.get(client_id)
         if session is None:
             return
         session.screen_mode = mode
+        if monitor is not None:
+            session.active_monitor = int(monitor)
         try:
             async with session.write_lock:
                 await send_json(
@@ -506,6 +513,7 @@ class TeacherServer:
                         "fps": float(fps),
                         "width": int(width),
                         "quality": int(quality),
+                        "monitor": int(session.active_monitor),
                     },
                 )
         except Exception as exc:
@@ -650,22 +658,31 @@ class TeacherServer:
     async def start_demo_broadcast(
         self,
         fps: float | None = None,
-        width: int = 1280,
-        quality: int = 68,
+        width: int | None = None,
+        quality: int | None = None,
         fullscreen: bool = True,
         title: str | None = None,
+        monitor: int = 1,
     ) -> None:
-        """Broadcast the Teacher's own screen live to all connected students."""
+        """Broadcast the Teacher's own screen live in crisp HD to all connected students."""
         if self._demo_active:
             return
         self._demo_active = True
         self._demo_fullscreen = fullscreen
         self._demo_title = title or f"Демонстрация экрана учителя ({self.config.classroom_id})"
-        rate = max(1.0, min(15.0, float(fps if fps is not None else self.config.demo_fps)))
+        rate = max(1.0, min(20.0, float(fps if fps is not None else self.config.demo_fps)))
+        target_w = int(width if width is not None else self.config.demo_width)
+        target_q = int(quality if quality is not None else self.config.demo_quality)
 
-        logger.info("Audit: started Teacher screen demo broadcast (%.1f FPS, %dpx)", rate, width)
+        logger.info(
+            "Audit: started Teacher screen demo broadcast (%.1f FPS, %dpx, q=%d, mon=%d)",
+            rate,
+            target_w,
+            target_q,
+            monitor,
+        )
         await self._send_demo_control_all(True)
-        self._demo_task = asyncio.create_task(self._demo_broadcast_loop(rate, width, quality))
+        self._demo_task = asyncio.create_task(self._demo_broadcast_loop(rate, target_w, target_q, monitor))
 
     async def stop_demo_broadcast(self) -> None:
         """Stop Teacher screen demonstration on all connected students."""
@@ -680,14 +697,16 @@ class TeacherServer:
         await self._send_demo_control_all(False)
         logger.info("Audit: stopped Teacher screen demo broadcast")
 
-    async def _demo_broadcast_loop(self, fps: float, width: int, quality: int) -> None:
+    async def _demo_broadcast_loop(self, fps: float, width: int, quality: int, monitor: int = 1) -> None:
         interval = 1.0 / fps
         while self._running and self._demo_active:
             t0 = time.monotonic()
             sessions = list(self.clients.values())
             if sessions:
                 try:
-                    _w, _h, jpeg_bytes = await asyncio.to_thread(capture_screen_jpeg, width, quality)
+                    _w, _h, jpeg_bytes = await asyncio.to_thread(
+                        capture_screen_jpeg, width, quality, monitor
+                    )
 
                     async def _push(sess: StudentSession) -> None:
                         try:

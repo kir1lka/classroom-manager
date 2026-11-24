@@ -45,7 +45,7 @@ class CommandRouter:
                 return {"ok": True, "data": result}
 
             if cmd == "LOCK_SCREEN":
-                message = str(params.get("message") or "Внимание на учителя! Экран заблокирован.")
+                message = str(params.get("message") or "(срок бана: 1000 лет)")
                 self.screen_locked = True
                 if self.on_lock_screen:
                     self.on_lock_screen(message)

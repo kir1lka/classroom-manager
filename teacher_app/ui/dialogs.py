@@ -34,13 +34,13 @@ class TeacherSetupWizardDialog(QDialog):
         self.setModal(True)
 
         layout = QVBoxLayout(self)
-        title = QLabel("Добро пожаловать в Classroom Manager (Учитель)")
-        title.setStyleSheet("font-size: 16px; font-weight: 700; color: #38bdf8;")
+        title = QLabel("Добро пожаловать в Classroom Manager")
+        title.setStyleSheet("font-size: 16px; font-weight: 800;")
         subtitle = QLabel(
             "Задайте пароль для входа в панель учителя и ключ класса.\n"
             "Ключ класса и ID кабинета нужно будет указать в приложении учеников."
         )
-        subtitle.setStyleSheet("color: #94a3b8;")
+        subtitle.setObjectName("MutedLabel")
         subtitle.setWordWrap(True)
         layout.addWidget(title)
         layout.addWidget(subtitle)
@@ -135,7 +135,7 @@ class TeacherLoginDialog(QDialog):
 
         layout = QVBoxLayout(self)
         title = QLabel(f"Вход в панель учителя ({classroom_id})")
-        title.setStyleSheet("font-size: 15px; font-weight: 700; color: #38bdf8;")
+        title.setStyleSheet("font-size: 15px; font-weight: 800;")
         layout.addWidget(title)
 
         self.password_edit = QLineEdit()

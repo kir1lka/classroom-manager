@@ -33,7 +33,7 @@ from shared.security import (
 from student_app.handlers.file_transfer import FileTransferReceiver
 from student_app.handlers.remote_input import handle_remote_input
 from student_app.handlers.router import CommandRouter
-from student_app.handlers.screen_capture import capture_screen_jpeg
+from student_app.handlers.screen_capture import capture_screen_jpeg, list_monitors
 from student_app.handlers.system_ops import get_active_window_title, get_screen_resolution
 from student_app.network.discovery import DiscoveredEndpoint, resolve_teacher_candidates
 
@@ -69,8 +69,9 @@ class StudentClient:
         # Screen streaming state
         self._screen_mode = ScreenMode.OFF
         self._screen_fps = 1.0
-        self._screen_width = 360
-        self._screen_quality = 55
+        self._screen_width = 480
+        self._screen_quality = 72
+        self._screen_monitor = 1
         self._screen_event = asyncio.Event()
 
         self.state = "STOPPED"
@@ -213,6 +214,7 @@ class StudentClient:
                     "os_info": f"{platform.system()} {platform.release()}",
                     "screen_width": screen_w,
                     "screen_height": screen_h,
+                    "monitors": list_monitors(),
                 },
             )
 
@@ -264,9 +266,10 @@ class StudentClient:
                     elif mtype == MessageType.SCREEN_CONTROL:
                         ctrl = decode_json(data)
                         self._screen_mode = ScreenMode(int(ctrl.get("mode", 0)))
-                        self._screen_fps = max(0.2, min(20.0, float(ctrl.get("fps", 1.0))))
-                        self._screen_width = int(ctrl.get("width", 360))
-                        self._screen_quality = int(ctrl.get("quality", 55))
+                        self._screen_fps = max(0.2, min(25.0, float(ctrl.get("fps", 1.0))))
+                        self._screen_width = int(ctrl.get("width", 480))
+                        self._screen_quality = int(ctrl.get("quality", 72))
+                        self._screen_monitor = int(ctrl.get("monitor", 1))
                         self._screen_event.set()
                     elif mtype == MessageType.REMOTE_INPUT:
                         inp = decode_json(data)
@@ -366,11 +369,13 @@ class StudentClient:
             mode = self._screen_mode
             target_w = self._screen_width
             quality = self._screen_quality
+            mon_idx = self._screen_monitor
             try:
                 orig_w, orig_h, jpeg_bytes = await asyncio.to_thread(
                     capture_screen_jpeg,
                     target_w,
                     quality,
+                    mon_idx,
                 )
                 packed = pack_screen_frame(orig_w, orig_h, mode, jpeg_bytes)
                 async with write_lock:

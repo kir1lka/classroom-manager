@@ -1,14 +1,35 @@
-"""Fullscreen Attention Lock overlay controlled remotely by the Teacher."""
+"""Fullscreen pure-black ban overlay with crisp vector red cross."""
 
 from __future__ import annotations
 
 from PySide6.QtCore import Qt
-from PySide6.QtGui import QGuiApplication
+from PySide6.QtGui import QColor, QGuiApplication, QPainter, QPen
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 
+class _RedCrossWidget(QWidget):
+    """Draws a razor-sharp vector red X cross centered on pure black."""
+
+    def __init__(self, size: int = 190, parent=None) -> None:
+        super().__init__(parent)
+        self.setFixedSize(size, size)
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground)
+
+    def paintEvent(self, _event) -> None:
+        painter = QPainter(self)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+        pen = QPen(QColor("#EF4444"), 22, Qt.PenStyle.SolidLine, Qt.PenCapStyle.RoundCap)
+        painter.setPen(pen)
+        pad = 26
+        w = self.width()
+        h = self.height()
+        painter.drawLine(pad, pad, w - pad, h - pad)
+        painter.drawLine(w - pad, pad, pad, h - pad)
+        painter.end()
+
+
 class ScreenLockOverlay(QWidget):
-    """Covers the entire virtual desktop while locked by the Teacher."""
+    """Covers the entire virtual desktop with pure black, red cross, and ban notice."""
 
     def __init__(self, hotkey_hint: str = "Ctrl+Alt+Shift+M") -> None:
         super().__init__(
@@ -18,43 +39,49 @@ class ScreenLockOverlay(QWidget):
             | Qt.WindowType.Tool,
         )
         self._locked = False
-        self.setStyleSheet("background-color: #0b1120;")
+        self.setStyleSheet("background-color: #000000;")
 
         layout = QVBoxLayout(self)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.setSpacing(18)
+        layout.setSpacing(20)
 
-        icon_lbl = QLabel("🔒")
-        icon_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        icon_lbl.setStyleSheet("font-size: 64px; background: transparent;")
+        self.cross = _RedCrossWidget(200, self)
+        layout.addWidget(self.cross, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        self.title_lbl = QLabel("Экран заблокирован учителем")
+        self.title_lbl = QLabel("ЗАБАНЕН")
         self.title_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.title_lbl.setStyleSheet(
-            "font-size: 32px; font-weight: 700; color: #f8fafc; background: transparent;"
+            "font-size: 52px; font-weight: 900; letter-spacing: 4px; "
+            "color: #FFFFFF; background: transparent;"
         )
 
-        self.msg_lbl = QLabel("Внимание на учителя!")
+        self.msg_lbl = QLabel("(срок бана: 1000 лет)")
         self.msg_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.msg_lbl.setWordWrap(True)
-        self.msg_lbl.setStyleSheet("font-size: 20px; color: #93c5fd; background: transparent;")
+        self.msg_lbl.setStyleSheet(
+            "font-size: 22px; font-weight: 600; color: #EF4444; background: transparent;"
+        )
 
-        self.hint_lbl = QLabel(f"Локальная разблокировка для учителя: {hotkey_hint}")
+        self.hint_lbl = QLabel(f"{hotkey_hint}")
         self.hint_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.hint_lbl.setStyleSheet("font-size: 12px; color: #475569; margin-top: 32px; background: transparent;")
+        self.hint_lbl.setStyleSheet(
+            "font-size: 11px; color: #262626; margin-top: 48px; background: transparent;"
+        )
 
-        layout.addWidget(icon_lbl)
         layout.addWidget(self.title_lbl)
         layout.addWidget(self.msg_lbl)
         layout.addWidget(self.hint_lbl)
 
     def set_hotkey_hint(self, hotkey: str) -> None:
-        self.hint_lbl.setText(f"Локальная разблокировка для учителя: {hotkey}")
+        self.hint_lbl.setText(hotkey)
 
-    def lock(self, message: str = "Внимание на учителя! Экран заблокирован.") -> None:
+    def lock(self, message: str = "(срок бана: 1000 лет)") -> None:
         self._locked = True
-        self.msg_lbl.setText(message)
-        # Span across all connected monitors
+        clean = (message or "").strip()
+        if not clean or "Внимание на учителя" in clean:
+            clean = "(срок бана: 1000 лет)"
+        self.msg_lbl.setText(clean)
+
         screens = QGuiApplication.screens()
         if screens:
             geom = screens[0].geometry()
@@ -76,7 +103,6 @@ class ScreenLockOverlay(QWidget):
         super().closeEvent(event)
 
     def keyPressEvent(self, event) -> None:
-        # Ignore Escape/Alt+F4 while locked
         if self._locked:
             event.accept()
             return

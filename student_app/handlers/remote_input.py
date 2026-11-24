@@ -18,7 +18,13 @@ MOUSEEVENTF_RIGHTUP = 0x0010
 MOUSEEVENTF_MIDDLEDOWN = 0x0020
 MOUSEEVENTF_MIDDLEUP = 0x0040
 MOUSEEVENTF_WHEEL = 0x0800
+MOUSEEVENTF_VIRTUALDESK = 0x4000
 MOUSEEVENTF_ABSOLUTE = 0x8000
+
+SM_XVIRTUALSCREEN = 76
+SM_YVIRTUALSCREEN = 77
+SM_CXVIRTUALSCREEN = 78
+SM_CYVIRTUALSCREEN = 79
 
 KEYEVENTF_KEYUP = 0x0002
 KEYEVENTF_UNICODE = 0x0004
@@ -77,9 +83,30 @@ def _send_input(*events: INPUT) -> None:
     ctypes.windll.user32.SendInput(len(events), ctypes.byref(arr), ctypes.sizeof(INPUT))
 
 
-def _norm_coord(val: float) -> int:
-    clamped = max(0.0, min(1.0, float(val)))
-    return int(round(clamped * 65535))
+from student_app.handlers.screen_capture import get_monitor_rect
+
+
+def _norm_coord_on_monitor(nx: float, ny: float, monitor_index: int = 1) -> tuple[int, int]:
+    """Map normalized (0..1, 0..1) on the selected monitor to Win32 virtual-desktop 0..65535."""
+    cx = max(0.0, min(1.0, float(nx)))
+    cy = max(0.0, min(1.0, float(ny)))
+
+    if sys.platform != "win32":
+        return int(round(cx * 65535)), int(round(cy * 65535))
+
+    mon_left, mon_top, mon_w, mon_h = get_monitor_rect(monitor_index)
+    abs_x = mon_left + cx * max(1, mon_w - 1)
+    abs_y = mon_top + cy * max(1, mon_h - 1)
+
+    user32 = ctypes.windll.user32
+    v_left = int(user32.GetSystemMetrics(SM_XVIRTUALSCREEN))
+    v_top = int(user32.GetSystemMetrics(SM_YVIRTUALSCREEN))
+    v_w = max(1, int(user32.GetSystemMetrics(SM_CXVIRTUALSCREEN)))
+    v_h = max(1, int(user32.GetSystemMetrics(SM_CYVIRTUALSCREEN)))
+
+    vx = int(round((abs_x - v_left) * 65535.0 / max(1, v_w - 1)))
+    vy = int(round((abs_y - v_top) * 65535.0 / max(1, v_h - 1)))
+    return max(0, min(65535, vx)), max(0, min(65535, vy))
 
 
 def handle_remote_input(payload: dict[str, Any]) -> None:
@@ -88,19 +115,19 @@ def handle_remote_input(payload: dict[str, Any]) -> None:
         return
 
     event = str(payload.get("event", ""))
+    monitor_index = int(payload.get("monitor", 1))
+    abs_flags = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK
 
     if event == "mouse_move":
-        dx = _norm_coord(payload.get("x", 0.0))
-        dy = _norm_coord(payload.get("y", 0.0))
+        dx, dy = _norm_coord_on_monitor(payload.get("x", 0.0), payload.get("y", 0.0), monitor_index)
         inp = INPUT(
             type=INPUT_MOUSE,
-            union=_INPUT_UNION(mi=MOUSEINPUT(dx, dy, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0, 0)),
+            union=_INPUT_UNION(mi=MOUSEINPUT(dx, dy, 0, MOUSEEVENTF_MOVE | abs_flags, 0, 0)),
         )
         _send_input(inp)
 
     elif event in ("mouse_down", "mouse_up"):
-        dx = _norm_coord(payload.get("x", 0.0))
-        dy = _norm_coord(payload.get("y", 0.0))
+        dx, dy = _norm_coord_on_monitor(payload.get("x", 0.0), payload.get("y", 0.0), monitor_index)
         button = str(payload.get("button", "left"))
         down = event == "mouse_down"
         flag_map = {
@@ -116,11 +143,11 @@ def handle_remote_input(payload: dict[str, Any]) -> None:
             return
         move_inp = INPUT(
             type=INPUT_MOUSE,
-            union=_INPUT_UNION(mi=MOUSEINPUT(dx, dy, 0, MOUSEEVENTF_MOVE | MOUSEEVENTF_ABSOLUTE, 0, 0)),
+            union=_INPUT_UNION(mi=MOUSEINPUT(dx, dy, 0, MOUSEEVENTF_MOVE | abs_flags, 0, 0)),
         )
         btn_inp = INPUT(
             type=INPUT_MOUSE,
-            union=_INPUT_UNION(mi=MOUSEINPUT(dx, dy, 0, btn_flag | MOUSEEVENTF_ABSOLUTE, 0, 0)),
+            union=_INPUT_UNION(mi=MOUSEINPUT(dx, dy, 0, btn_flag | abs_flags, 0, 0)),
         )
         _send_input(move_inp, btn_inp)
 

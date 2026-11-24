@@ -1,4 +1,4 @@
-"""Main Teacher console window: live screen grid, controls, PowerShell, and audit log."""
+"""Spotify-inspired Teacher console: sidebar navigation, dark/light themes, HD live view, saved commands."""
 
 from __future__ import annotations
 
@@ -9,32 +9,36 @@ from typing import Any
 from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QAction, QPixmap
 from PySide6.QtWidgets import (
+    QApplication,
+    QButtonGroup,
     QComboBox,
     QFrame,
     QGridLayout,
     QHBoxLayout,
     QInputDialog,
     QLabel,
+    QListWidget,
+    QListWidgetItem,
     QMainWindow,
     QMenu,
     QMessageBox,
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
-    QSizePolicy,
-    QTabWidget,
+    QSplitter,
+    QStackedWidget,
     QVBoxLayout,
     QWidget,
 )
 
 from shared.config import TeacherConfig, save_config
-from shared.protocol import ScreenMode
+from student_app.handlers.screen_capture import list_monitors
 from teacher_app.network.discovery import get_local_ipv4_addresses
 from teacher_app.network.server import StudentSession, TeacherServer
 from teacher_app.ui.dialogs import TeacherSettingsDialog
 from teacher_app.ui.file_transfer_dialog import FileTransferDialog
 from teacher_app.ui.remote_view import RemoteControlDialog
-from teacher_app.ui.theme import make_status_icon
+from teacher_app.ui.theme import get_stylesheet, make_status_icon
 
 
 class ServerSignals(QObject):
@@ -48,7 +52,7 @@ class ServerSignals(QObject):
 
 
 class StudentCardWidget(QFrame):
-    """Interactive card showing one student's live thumbnail and status."""
+    """Clean Spotify-style card showing one student's live screen preview and status."""
 
     clicked = Signal(str)
     double_clicked = Signal(str)
@@ -58,40 +62,43 @@ class StudentCardWidget(QFrame):
         super().__init__(parent)
         self.client_id = session.client_id
         self.setObjectName("StudentCard")
-        self.setFixedSize(310, 255)
+        self.setFixedSize(316, 260)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         layout = QVBoxLayout(self)
-        layout.setContentsMargins(10, 10, 10, 10)
-        layout.setSpacing(6)
+        layout.setContentsMargins(12, 12, 12, 10)
+        layout.setSpacing(7)
 
         # Header row
         top = QHBoxLayout()
+        top.setSpacing(6)
         self.title_lbl = QLabel(session.label)
-        self.title_lbl.setStyleSheet("font-weight: 700; font-size: 13px; background: transparent;")
+        self.title_lbl.setStyleSheet("font-weight: 700; font-size: 13px;")
+
+        self.mon_lbl = QLabel("")
+        self.mon_lbl.setObjectName("MonBadge")
+        self.mon_lbl.setVisible(False)
+
         self.badge_lbl = QLabel("ONLINE")
-        self.badge_lbl.setStyleSheet(
-            "background-color: #065f46; color: #a7f3d0; padding: 2px 7px; "
-            "border-radius: 4px; font-size: 11px; font-weight: 700;"
-        )
+        self.badge_lbl.setObjectName("OnlineBadge")
+
         top.addWidget(self.title_lbl, stretch=1)
+        top.addWidget(self.mon_lbl)
         top.addWidget(self.badge_lbl)
         layout.addLayout(top)
 
         # Screen preview
-        self.preview_lbl = QLabel("Загрузка экрана...")
+        self.preview_lbl = QLabel("Ожидание экрана...")
+        self.preview_lbl.setObjectName("PreviewBox")
         self.preview_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_lbl.setFixedSize(288, 162)
-        self.preview_lbl.setStyleSheet(
-            "background-color: #020617; color: #64748b; border-radius: 6px; border: 1px solid #334155;"
-        )
+        self.preview_lbl.setFixedSize(292, 164)
         layout.addWidget(self.preview_lbl)
 
         # Footer meta
         self.meta_lbl = QLabel()
-        self.meta_lbl.setStyleSheet("color: #94a3b8; font-size: 11px; background: transparent;")
+        self.meta_lbl.setObjectName("MutedLabel")
         self.window_lbl = QLabel()
-        self.window_lbl.setStyleSheet("color: #cbd5e1; font-size: 11px; background: transparent;")
+        self.window_lbl.setStyleSheet("font-size: 11px;")
         layout.addWidget(self.meta_lbl)
         layout.addWidget(self.window_lbl)
 
@@ -104,24 +111,28 @@ class StudentCardWidget(QFrame):
 
     def update_session(self, session: StudentSession) -> None:
         self.title_lbl.setText(session.label)
-        ping_str = f" | {session.last_ping_ms:.0f} мс" if session.last_ping_ms is not None else ""
+        ping_str = f"  •  {session.last_ping_ms:.0f} мс" if session.last_ping_ms is not None else ""
         self.meta_lbl.setText(f"{session.username} @ {session.ip}{ping_str}")
         win = session.active_window.strip()
-        self.window_lbl.setText((win[:42] + "…") if len(win) > 43 else (win or "Рабочий стол"))
+        self.window_lbl.setText((win[:40] + "…") if len(win) > 41 else (win or "Рабочий стол"))
+
+        mon_count = len(session.monitors)
+        if mon_count > 1:
+            self.mon_lbl.setText(f"{mon_count} мон.")
+            self.mon_lbl.setVisible(True)
+        else:
+            self.mon_lbl.setVisible(False)
 
         self.setProperty("locked", "true" if session.locked else "false")
         if session.locked:
-            self.badge_lbl.setText("ЗАБЛОКИРОВАН")
-            self.badge_lbl.setStyleSheet(
-                "background-color: #991b1b; color: #fecaca; padding: 2px 7px; "
-                "border-radius: 4px; font-size: 11px; font-weight: 700;"
-            )
+            self.badge_lbl.setText("ЗАБАНЕН")
+            self.badge_lbl.setObjectName("BanBadge")
         else:
             self.badge_lbl.setText("ONLINE")
-            self.badge_lbl.setStyleSheet(
-                "background-color: #065f46; color: #a7f3d0; padding: 2px 7px; "
-                "border-radius: 4px; font-size: 11px; font-weight: 700;"
-            )
+            self.badge_lbl.setObjectName("OnlineBadge")
+
+        self.badge_lbl.style().unpolish(self.badge_lbl)
+        self.badge_lbl.style().polish(self.badge_lbl)
         self.style().unpolish(self)
         self.style().polish(self)
 
@@ -150,10 +161,10 @@ class StudentCardWidget(QFrame):
         self.clicked.emit(self.client_id)
         menu = QMenu(self)
         actions = [
-            ("control", "Просмотр и управление ПК"),
-            ("lock", "Заблокировать экран (внимание)"),
-            ("unlock", "Разблокировать экран"),
-            ("send_file", "Передать файл на ПК..."),
+            ("control", "Просмотр и управление ПК (выбор монитора)"),
+            ("lock", "Забанить экран (чёрный экран + красный крест)"),
+            ("unlock", "Разбанить экран"),
+            ("send_file", "Передать файл на этот ПК..."),
             ("message", "Отправить сообщение"),
             ("powershell", "Открыть PowerShell для ПК"),
             ("ping", "Пинг и инфо о системе"),
@@ -168,13 +179,13 @@ class StudentCardWidget(QFrame):
                 menu.addSeparator()
                 continue
             act = QAction(label, self)
-            act.triggered.connect(lambda _checked=False, k=key: self.context_action.emit(self.client_id, k))
+            act.triggered.connect(lambda _c=False, k=key: self.context_action.emit(self.client_id, k))
             menu.addAction(act)
         menu.exec(event.globalPos())
 
 
 class TeacherMainWindow(QMainWindow):
-    """Main desktop dashboard for the Teacher application."""
+    """Spotify-style desktop dashboard for the Teacher application."""
 
     def __init__(
         self,
@@ -189,9 +200,9 @@ class TeacherMainWindow(QMainWindow):
         self.data_dir = data_dir
         self.signals = signals
 
-        self.setWindowTitle(f"Classroom Manager — Панель учителя ({config.classroom_id})")
-        self.setWindowIcon(make_status_icon("#2563eb"))
-        self.resize(1240, 780)
+        self.setWindowTitle(f"Classroom Manager — {config.classroom_id}")
+        self.setWindowIcon(make_status_icon("#1DB954", "#000000"))
+        self.resize(1340, 820)
 
         self.server = TeacherServer(
             config=config,
@@ -211,68 +222,153 @@ class TeacherMainWindow(QMainWindow):
 
     def _build_ui(self) -> None:
         central = QWidget()
-        root = QVBoxLayout(central)
+        root = QHBoxLayout(central)
         root.setContentsMargins(0, 0, 0, 0)
         root.setSpacing(0)
 
-        # Header Bar
-        header = QFrame()
-        header.setObjectName("HeaderBar")
-        h_layout = QHBoxLayout(header)
-        h_layout.setContentsMargins(16, 10, 16, 10)
+        # ================= LEFT SIDEBAR (Spotify-style) =================
+        sidebar = QFrame()
+        sidebar.setObjectName("Sidebar")
+        sidebar.setFixedWidth(272)
+        sb = QVBoxLayout(sidebar)
+        sb.setContentsMargins(16, 18, 16, 16)
+        sb.setSpacing(8)
 
-        self.room_info_lbl = QLabel()
-        self.room_info_lbl.setStyleSheet("font-size: 14px; font-weight: 700; color: #f8fafc; background: transparent;")
-        self.net_info_lbl = QLabel()
-        self.net_info_lbl.setStyleSheet("color: #94a3b8; background: transparent;")
+        brand_row = QHBoxLayout()
+        brand_lbl = QLabel("CLASSROOM")
+        brand_lbl.setObjectName("BrandTitle")
+        self.online_pill = QLabel("0 онлайн")
+        self.online_pill.setObjectName("OnlineBadge")
+        brand_row.addWidget(brand_lbl)
+        brand_row.addStretch()
+        brand_row.addWidget(self.online_pill)
+        sb.addLayout(brand_row)
 
-        self.secret_toggle_btn = QPushButton("Показать ключ класса")
-        self.secret_toggle_btn.setCheckable(True)
-        self.secret_toggle_btn.toggled.connect(self._refresh_header_labels)
+        self.room_sub_lbl = QLabel()
+        self.room_sub_lbl.setObjectName("MutedLabel")
+        sb.addWidget(self.room_sub_lbl)
+        sb.addSpacing(12)
 
-        settings_btn = QPushButton("Настройки")
-        settings_btn.clicked.connect(self._open_settings)
+        nav_lbl = QLabel("РАЗДЕЛЫ")
+        nav_lbl.setObjectName("SectionLabel")
+        sb.addWidget(nav_lbl)
 
-        h_layout.addWidget(self.room_info_lbl)
-        h_layout.addSpacing(16)
-        h_layout.addWidget(self.net_info_lbl, stretch=1)
-        h_layout.addWidget(self.secret_toggle_btn)
-        h_layout.addWidget(settings_btn)
-        root.addWidget(header)
+        self.nav_group = QButtonGroup(self)
+        self.nav_group.setExclusive(True)
 
-        # Action Toolbar
-        toolbar = QHBoxLayout()
-        toolbar.setContentsMargins(16, 10, 16, 6)
-        toolbar.setSpacing(8)
+        self.nav_screens = self._make_nav_btn("Экраны класса", 0, checked=True)
+        self.nav_commands = self._make_nav_btn("Команды (PowerShell)", 1)
+        self.nav_logs = self._make_nav_btn("Журнал аудита", 2)
+        sb.addWidget(self.nav_screens)
+        sb.addWidget(self.nav_commands)
+        sb.addWidget(self.nav_logs)
 
-        self.btn_remote = QPushButton("Управление ПК")
-        self.btn_remote.setProperty("accent", "primary")
-        self.btn_remote.clicked.connect(self._open_selected_remote)
+        sb.addSpacing(14)
+        quick_lbl = QLabel("УПРАВЛЕНИЕ КЛАССОМ")
+        quick_lbl.setObjectName("SectionLabel")
+        sb.addWidget(quick_lbl)
 
-        self.btn_lock = QPushButton("Блок экрана")
-        self.btn_lock.setProperty("accent", "warning")
-        self.btn_lock.clicked.connect(lambda: self._run_on_selected("lock"))
-
-        self.btn_unlock = QPushButton("Разблок.")
-        self.btn_unlock.setProperty("accent", "success")
-        self.btn_unlock.clicked.connect(lambda: self._run_on_selected("unlock"))
-
-        self.btn_lock_all = QPushButton("Блок ВСЕХ")
-        self.btn_lock_all.clicked.connect(self._lock_all_students)
-
-        self.btn_unlock_all = QPushButton("Разблок. ВСЕХ")
-        self.btn_unlock_all.clicked.connect(self._unlock_all_students)
+        # Teacher monitor picker for Demo broadcast if teacher has >1 monitor
+        self._teacher_monitors = list_monitors()
+        self.demo_mon_combo = QComboBox()
+        for mon in self._teacher_monitors:
+            self.demo_mon_combo.addItem(f"Показ: {mon['name']}", int(mon["index"]))
+        self.demo_mon_combo.setVisible(len(self._teacher_monitors) > 1)
+        sb.addWidget(self.demo_mon_combo)
 
         self.btn_demo = QPushButton("Демонстрация экрана")
         self.btn_demo.setCheckable(True)
         self.btn_demo.setProperty("accent", "primary")
         self.btn_demo.toggled.connect(self._toggle_demo_broadcast)
+        sb.addWidget(self.btn_demo)
+
+        self.btn_files = QPushButton("Передать файл классу")
+        self.btn_files.clicked.connect(lambda: self._open_file_transfer())
+        sb.addWidget(self.btn_files)
+
+        ban_row = QHBoxLayout()
+        ban_row.setSpacing(6)
+        self.btn_lock_all = QPushButton("Бан всех")
+        self.btn_lock_all.setProperty("accent", "warning")
+        self.btn_lock_all.clicked.connect(self._lock_all_students)
+        self.btn_unlock_all = QPushButton("Разбан всех")
+        self.btn_unlock_all.clicked.connect(self._unlock_all_students)
+        ban_row.addWidget(self.btn_lock_all)
+        ban_row.addWidget(self.btn_unlock_all)
+        sb.addLayout(ban_row)
+
+        sb.addStretch()
+
+        # Bottom connection & theme card
+        info_card = QFrame()
+        info_card.setObjectName("SidebarCard")
+        ic = QVBoxLayout(info_card)
+        ic.setContentsMargins(12, 10, 12, 10)
+        ic.setSpacing(6)
+
+        self.net_info_lbl = QLabel()
+        self.net_info_lbl.setObjectName("MutedLabel")
+        self.net_info_lbl.setWordWrap(True)
+        ic.addWidget(self.net_info_lbl)
+
+        key_row = QHBoxLayout()
+        self.secret_toggle_btn = QPushButton("Ключ")
+        self.secret_toggle_btn.setCheckable(True)
+        self.secret_toggle_btn.toggled.connect(self._refresh_header_labels)
+        copy_key_btn = QPushButton("Копир.")
+        copy_key_btn.clicked.connect(self._copy_class_secret)
+        key_row.addWidget(self.secret_toggle_btn, stretch=1)
+        key_row.addWidget(copy_key_btn, stretch=1)
+        ic.addLayout(key_row)
+        sb.addWidget(info_card)
+
+        # Theme & Settings buttons
+        bottom_row = QHBoxLayout()
+        bottom_row.setSpacing(6)
+        self.theme_btn = QPushButton()
+        self.theme_btn.clicked.connect(self._toggle_theme)
+        self._update_theme_button_text()
+
+        settings_btn = QPushButton("Настройки")
+        settings_btn.clicked.connect(self._open_settings)
+        bottom_row.addWidget(self.theme_btn, stretch=1)
+        bottom_row.addWidget(settings_btn)
+        sb.addLayout(bottom_row)
+
+        root.addWidget(sidebar)
+
+        # ================= RIGHT CONTENT AREA =================
+        content = QWidget()
+        content.setObjectName("ContentArea")
+        c_layout = QVBoxLayout(content)
+        c_layout.setContentsMargins(0, 0, 0, 0)
+        c_layout.setSpacing(0)
+
+        # Contextual Top Bar
+        top_bar = QFrame()
+        top_bar.setObjectName("TopBar")
+        tb = QHBoxLayout(top_bar)
+        tb.setContentsMargins(20, 12, 20, 12)
+        tb.setSpacing(8)
+
+        self.page_title_lbl = QLabel("Экраны класса")
+        self.page_title_lbl.setObjectName("PageTitle")
+        tb.addWidget(self.page_title_lbl)
+        tb.addStretch()
+
+        self.btn_remote = QPushButton("Управление ПК")
+        self.btn_remote.setProperty("accent", "primary")
+        self.btn_remote.clicked.connect(self._open_selected_remote)
+
+        self.btn_lock = QPushButton("Забанить")
+        self.btn_lock.setProperty("accent", "warning")
+        self.btn_lock.clicked.connect(lambda: self._run_on_selected("lock"))
+
+        self.btn_unlock = QPushButton("Разбанить")
+        self.btn_unlock.clicked.connect(lambda: self._run_on_selected("unlock"))
 
         self.btn_msg = QPushButton("Сообщение")
         self.btn_msg.clicked.connect(self._send_message_dialog)
-
-        self.btn_files = QPushButton("Передать файл")
-        self.btn_files.clicked.connect(lambda: self._open_file_transfer())
 
         self.btn_ping = QPushButton("Пинг / Инфо")
         self.btn_ping.clicked.connect(lambda: self._run_on_selected("ping"))
@@ -281,33 +377,26 @@ class TeacherMainWindow(QMainWindow):
         self.btn_power.setProperty("accent", "danger")
         self.btn_power.setMenu(self._build_power_menu())
 
-        toolbar.addWidget(self.btn_remote)
-        toolbar.addWidget(self.btn_lock)
-        toolbar.addWidget(self.btn_unlock)
-        toolbar.addSpacing(10)
-        toolbar.addWidget(self.btn_lock_all)
-        toolbar.addWidget(self.btn_unlock_all)
-        toolbar.addSpacing(10)
-        toolbar.addWidget(self.btn_demo)
-        toolbar.addWidget(self.btn_files)
-        toolbar.addWidget(self.btn_msg)
-        toolbar.addWidget(self.btn_ping)
-        toolbar.addStretch()
-        toolbar.addWidget(self.btn_power)
-        root.addLayout(toolbar)
+        tb.addWidget(self.btn_remote)
+        tb.addWidget(self.btn_lock)
+        tb.addWidget(self.btn_unlock)
+        tb.addWidget(self.btn_msg)
+        tb.addWidget(self.btn_ping)
+        tb.addWidget(self.btn_power)
+        c_layout.addWidget(top_bar)
 
-        # Tabs
-        self.tabs = QTabWidget()
-        self.tabs.setContentsMargins(12, 6, 12, 12)
+        # Stacked pages
+        self.pages = QStackedWidget()
 
-        # Tab 1: Classroom Screens Grid
-        grid_container = QWidget()
-        grid_v = QVBoxLayout(grid_container)
-        grid_v.setContentsMargins(12, 12, 12, 12)
+        # ---------- PAGE 0: Classroom Grid ----------
+        grid_page = QWidget()
+        grid_v = QVBoxLayout(grid_page)
+        grid_v.setContentsMargins(20, 18, 20, 18)
 
         self.empty_hint = QLabel()
         self.empty_hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.empty_hint.setStyleSheet("color: #94a3b8; font-size: 14px; padding: 40px;")
+        self.empty_hint.setObjectName("MutedLabel")
+        self.empty_hint.setStyleSheet("font-size: 14px; padding: 48px;")
         grid_v.addWidget(self.empty_hint)
 
         self.scroll_area = QScrollArea()
@@ -315,50 +404,79 @@ class TeacherMainWindow(QMainWindow):
         self.grid_widget = QWidget()
         self.grid_layout = QGridLayout(self.grid_widget)
         self.grid_layout.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignLeft)
-        self.grid_layout.setSpacing(14)
+        self.grid_layout.setSpacing(16)
         self.scroll_area.setWidget(self.grid_widget)
         self.scroll_area.hide()
         grid_v.addWidget(self.scroll_area, stretch=1)
+        self.pages.addWidget(grid_page)
 
-        self.tabs.addTab(grid_container, "Класс (Экраны)")
+        # ---------- PAGE 1: PowerShell + Saved Commands Library ----------
+        ps_page = QWidget()
+        ps_outer = QVBoxLayout(ps_page)
+        ps_outer.setContentsMargins(20, 18, 20, 18)
 
-        # Tab 2: PowerShell Console
-        ps_tab = QWidget()
-        ps_layout = QVBoxLayout(ps_tab)
-        ps_layout.setContentsMargins(12, 12, 12, 12)
+        splitter = QSplitter(Qt.Orientation.Horizontal)
 
-        ps_top = QHBoxLayout()
-        self.ps_target_combo = QComboBox()
-        self.ps_target_combo.setMinimumWidth(260)
-        self._refresh_ps_targets()
+        # Left column: Saved Commands Library
+        saved_panel = QFrame()
+        saved_panel.setObjectName("SidebarCard")
+        saved_panel.setMinimumWidth(260)
+        saved_panel.setMaximumWidth(340)
+        sp = QVBoxLayout(saved_panel)
+        sp.setContentsMargins(12, 12, 12, 12)
+        sp.setSpacing(8)
 
-        self.ps_preset_combo = QComboBox()
-        self.ps_preset_combo.currentIndexChanged.connect(self._apply_ps_preset)
-        self._refresh_saved_commands()
+        sp_title = QLabel("СОХРАНЁННЫЕ КОМАНДЫ")
+        sp_title.setObjectName("SectionLabel")
+        sp.addWidget(sp_title)
 
-        save_cmd_btn = QPushButton("Сохранить команду")
+        self.saved_cmd_list = QListWidget()
+        self.saved_cmd_list.itemClicked.connect(self._on_saved_cmd_clicked)
+        self.saved_cmd_list.itemDoubleClicked.connect(self._on_saved_cmd_double_clicked)
+        sp.addWidget(self.saved_cmd_list, stretch=1)
+
+        sp_btns = QHBoxLayout()
+        sp_btns.setSpacing(6)
+        save_cmd_btn = QPushButton("+ Сохранить")
+        save_cmd_btn.setProperty("accent", "primary")
         save_cmd_btn.clicked.connect(self._save_current_ps_command)
-
         del_cmd_btn = QPushButton("Удалить")
         del_cmd_btn.clicked.connect(self._delete_selected_ps_command)
+        sp_btns.addWidget(save_cmd_btn, stretch=1)
+        sp_btns.addWidget(del_cmd_btn)
+        sp.addLayout(sp_btns)
 
-        ps_top.addWidget(QLabel("Цель:"))
-        ps_top.addWidget(self.ps_target_combo)
-        ps_top.addSpacing(10)
-        ps_top.addWidget(QLabel("Сохранённые:"))
-        ps_top.addWidget(self.ps_preset_combo, stretch=1)
-        ps_top.addWidget(save_cmd_btn)
-        ps_top.addWidget(del_cmd_btn)
-        ps_layout.addLayout(ps_top)
+        run_saved_all_btn = QPushButton("Запустить выбранную на ВСЕХ")
+        run_saved_all_btn.setProperty("accent", "success")
+        run_saved_all_btn.clicked.connect(self._run_selected_saved_on_all)
+        sp.addWidget(run_saved_all_btn)
+
+        # Right column: Editor + Execution + Output
+        exec_panel = QWidget()
+        ep = QVBoxLayout(exec_panel)
+        ep.setContentsMargins(14, 0, 0, 0)
+        ep.setSpacing(10)
+
+        target_row = QHBoxLayout()
+        self.ps_target_combo = QComboBox()
+        self.ps_target_combo.setMinimumWidth(280)
+        self._refresh_ps_targets()
+        target_row.addWidget(QLabel("Цель выполнения:"))
+        target_row.addWidget(self.ps_target_combo)
+        target_row.addStretch()
+        ep.addLayout(target_row)
 
         self.ps_input = QPlainTextEdit()
-        self.ps_input.setPlaceholderText("Введите PowerShell-команду, например: Get-Date; hostname")
-        self.ps_input.setFixedHeight(85)
+        self.ps_input.setPlaceholderText(
+            "Введите PowerShell-команду (например: Start-Process 'https://python.org') "
+            "и нажмите «+ Сохранить», чтобы добавить в библиотеку слева..."
+        )
+        self.ps_input.setFixedHeight(96)
         self.ps_input.setStyleSheet('font-family: "Consolas", monospace; font-size: 13px;')
-        ps_layout.addWidget(self.ps_input)
+        ep.addWidget(self.ps_input)
 
         ps_btns = QHBoxLayout()
-        run_ps_btn = QPushButton("Выполнить (выбранная цель)")
+        run_ps_btn = QPushButton("Выполнить (цель)")
         run_ps_btn.setProperty("accent", "primary")
         run_ps_btn.clicked.connect(self._execute_powershell)
         run_all_ps_btn = QPushButton("Запустить на ВСЕХ ПК")
@@ -370,37 +488,69 @@ class TeacherMainWindow(QMainWindow):
         ps_btns.addWidget(run_all_ps_btn)
         ps_btns.addWidget(clear_ps_btn)
         ps_btns.addStretch()
-        ps_layout.addLayout(ps_btns)
+        ep.addLayout(ps_btns)
 
         self.ps_output = QPlainTextEdit()
+        self.ps_output.setObjectName("ConsoleBox")
         self.ps_output.setReadOnly(True)
-        self.ps_output.setStyleSheet(
-            'background-color: #020617; color: #e2e8f0; font-family: "Consolas", monospace; font-size: 12px;'
-        )
-        ps_layout.addWidget(self.ps_output, stretch=1)
+        ep.addWidget(self.ps_output, stretch=1)
 
-        self.tabs.addTab(ps_tab, "PowerShell")
+        splitter.addWidget(saved_panel)
+        splitter.addWidget(exec_panel)
+        splitter.setStretchFactor(0, 0)
+        splitter.setStretchFactor(1, 1)
+        ps_outer.addWidget(splitter, stretch=1)
+        self.pages.addWidget(ps_page)
 
-        # Tab 3: Audit Log
-        log_tab = QWidget()
-        log_layout = QVBoxLayout(log_tab)
-        log_layout.setContentsMargins(12, 12, 12, 12)
+        # ---------- PAGE 2: Audit Log ----------
+        log_page = QWidget()
+        log_v = QVBoxLayout(log_page)
+        log_v.setContentsMargins(20, 18, 20, 18)
         self.log_view = QPlainTextEdit()
+        self.log_view.setObjectName("ConsoleBox")
         self.log_view.setReadOnly(True)
-        self.log_view.setStyleSheet(
-            'background-color: #020617; color: #94a3b8; font-family: "Consolas", monospace; font-size: 12px;'
-        )
-        log_layout.addWidget(self.log_view)
-        self.tabs.addTab(log_tab, "Журнал (Аудит)")
+        log_v.addWidget(self.log_view)
+        self.pages.addWidget(log_page)
 
-        tab_wrap = QVBoxLayout()
-        tab_wrap.setContentsMargins(12, 4, 12, 12)
-        tab_wrap.addWidget(self.tabs)
-        root.addLayout(tab_wrap, stretch=1)
+        c_layout.addWidget(self.pages, stretch=1)
+        root.addWidget(content, stretch=1)
 
         self.setCentralWidget(central)
+        self._refresh_saved_commands()
         self._refresh_header_labels()
         self._update_toolbar_state()
+
+    def _make_nav_btn(self, text: str, page_index: int, checked: bool = False) -> QPushButton:
+        btn = QPushButton(text)
+        btn.setObjectName("NavButton")
+        btn.setCheckable(True)
+        btn.setChecked(checked)
+        btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        btn.clicked.connect(lambda: self._switch_page(page_index, text))
+        self.nav_group.addButton(btn, page_index)
+        return btn
+
+    def _switch_page(self, page_index: int, title: str) -> None:
+        self.pages.setCurrentIndex(page_index)
+        self.page_title_lbl.setText(title)
+
+    def _toggle_theme(self) -> None:
+        self.config.theme = "light" if self.config.theme == "dark" else "dark"
+        save_config(self.config_path, self.config)
+        app = QApplication.instance()
+        if app is not None:
+            app.setStyleSheet(get_stylesheet(self.config.theme))
+        self._update_theme_button_text()
+
+    def _update_theme_button_text(self) -> None:
+        if self.config.theme == "dark":
+            self.theme_btn.setText("Светлая тема")
+        else:
+            self.theme_btn.setText("Тёмная тема")
+
+    def _copy_class_secret(self) -> None:
+        QApplication.clipboard().setText(self.config.class_secret)
+        self.statusBar().showMessage("Ключ класса скопирован в буфер обмена", 3000)
 
     def _build_power_menu(self) -> QMenu:
         menu = QMenu(self)
@@ -438,8 +588,8 @@ class TeacherMainWindow(QMainWindow):
             await self.server.start()
             self._refresh_header_labels()
             self.statusBar().showMessage(
-                f"Сервер запущен (TLS порт {self.server.bound_port}, "
-                f"автопоиск {'ВКЛ' if self.config.discovery_enabled else 'ВЫКЛ'})"
+                f"Сервер активен  •  TLS-порт {self.server.bound_port}  •  "
+                f"Автопоиск LAN {'ВКЛ' if self.config.discovery_enabled else 'ВЫКЛ'}"
             )
         except OSError as exc:
             QMessageBox.critical(
@@ -451,24 +601,26 @@ class TeacherMainWindow(QMainWindow):
     def _refresh_header_labels(self) -> None:
         ips = ", ".join(get_local_ipv4_addresses())
         online = len(self.server.clients)
-        self.room_info_lbl.setText(f"Кабинет: {self.config.classroom_id}   |   Онлайн: {online}")
+        self.online_pill.setText(f"{online} онлайн")
+        self.room_sub_lbl.setText(f"Кабинет: {self.config.classroom_id}")
         secret_disp = self.config.class_secret if self.secret_toggle_btn.isChecked() else "••••••••••••"
         self.net_info_lbl.setText(
-            f"LAN IP учителя: {ips}  |  TLS-порт: {self.server.bound_port}  |  Ключ: {secret_disp}"
+            f"IP учителя: {ips}\n"
+            f"Порт: {self.server.bound_port}  •  Ключ: {secret_disp}"
         )
         self.empty_hint.setText(
-            f"Пока нет подключённых учеников.\n\n"
-            f"Запустите Classroom Student на ПК учеников и укажите:\n"
-            f"ID кабинета: {self.config.classroom_id}\n"
-            f"Автопоиск по LAN работает автоматически (статический IP не требуется).\n"
-            f"Текущий LAN IP учителя: {ips}"
+            f"Ожидание подключения учеников\n\n"
+            f"Запустите ClassroomStudent.exe на компьютерах класса:\n"
+            f"ID кабинета: {self.config.classroom_id}  •  LAN IP учителя: {ips}\n"
+            f"Автопоиск работает автоматически (статический IP не требуется)."
         )
 
     def _relayout_grid(self) -> None:
         while self.grid_layout.count():
             self.grid_layout.takeAt(0)
 
-        cols = max(1, (self.width() - 60) // 330)
+        avail_w = max(340, self.width() - 300)
+        cols = max(1, avail_w // 334)
         for idx, card in enumerate(self.cards.values()):
             r, c = divmod(idx, cols)
             self.grid_layout.addWidget(card, r, c)
@@ -526,7 +678,7 @@ class TeacherMainWindow(QMainWindow):
         if card is not None:
             card.update_session(session)
 
-    def _on_screen_frame(self, client_id: str, _w: int, _h: int, mode_int: int, jpeg_bytes: bytes) -> None:
+    def _on_screen_frame(self, client_id: str, _w: int, _h: int, _mode_int: int, jpeg_bytes: bytes) -> None:
         card = self.cards.get(client_id)
         if card is not None:
             card.update_thumbnail(jpeg_bytes)
@@ -568,36 +720,55 @@ class TeacherMainWindow(QMainWindow):
             if idx >= 0:
                 self.ps_target_combo.setCurrentIndex(idx)
 
+    # ---------- Saved PowerShell Commands ----------
     def _refresh_saved_commands(self) -> None:
-        self.ps_preset_combo.blockSignals(True)
-        self.ps_preset_combo.clear()
-        self.ps_preset_combo.addItem("Выберите сохранённую команду...", "")
+        self.saved_cmd_list.clear()
         for item in self.config.saved_commands:
             name = str(item.get("name", "")).strip()
             script = str(item.get("script", "")).strip()
             if name and script:
-                self.ps_preset_combo.addItem(name, script)
-        self.ps_preset_combo.blockSignals(False)
+                lw_item = QListWidgetItem(name)
+                lw_item.setData(Qt.ItemDataRole.UserRole, script)
+                lw_item.setToolTip(script)
+                self.saved_cmd_list.addItem(lw_item)
 
-    def _apply_ps_preset(self, idx: int) -> None:
-        cmd = self.ps_preset_combo.itemData(idx)
-        if cmd:
-            self.ps_input.setPlainText(cmd)
+    def _on_saved_cmd_clicked(self, item: QListWidgetItem) -> None:
+        script = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        if script:
+            self.ps_input.setPlainText(script)
+
+    def _on_saved_cmd_double_clicked(self, item: QListWidgetItem) -> None:
+        script = str(item.data(Qt.ItemDataRole.UserRole) or "")
+        if script:
+            self.ps_input.setPlainText(script)
+            asyncio.create_task(self._run_ps_async("__ALL__", script))
+
+    def _run_selected_saved_on_all(self) -> None:
+        item = self.saved_cmd_list.currentItem()
+        if item is None:
+            self._execute_powershell_all()
+            return
+        script = str(item.data(Qt.ItemDataRole.UserRole) or "").strip()
+        if script:
+            self.ps_input.setPlainText(script)
+            asyncio.create_task(self._run_ps_async("__ALL__", script))
 
     def _save_current_ps_command(self) -> None:
         script = self.ps_input.toPlainText().strip()
         if not script:
-            QMessageBox.warning(self, "Пустая команда", "Сначала введите PowerShell-команду в поле ниже.")
+            QMessageBox.warning(self, "Пустая команда", "Сначала введите PowerShell-команду в поле редактора.")
             return
+        cur_item = self.saved_cmd_list.currentItem()
+        default_name = cur_item.text() if cur_item else ""
         name, ok = QInputDialog.getText(
             self,
             "Сохранить команду",
-            "Название команды (будет сохранено навсегда):",
+            "Название команды (сохранится навсегда):",
+            text=default_name,
         )
         if not ok or not name.strip():
             return
         clean_name = name.strip()
-        # Update existing by same name or append new
         updated = False
         for item in self.config.saved_commands:
             if str(item.get("name", "")).strip().lower() == clean_name.lower():
@@ -609,16 +780,13 @@ class TeacherMainWindow(QMainWindow):
             self.config.saved_commands.append({"name": clean_name, "script": script})
         save_config(self.config_path, self.config)
         self._refresh_saved_commands()
-        idx = self.ps_preset_combo.findText(clean_name)
-        if idx >= 0:
-            self.ps_preset_combo.setCurrentIndex(idx)
-        self.statusBar().showMessage(f"Команда «{clean_name}» сохранена", 4000)
+        self.statusBar().showMessage(f"Команда «{clean_name}» сохранена в библиотеку", 4000)
 
     def _delete_selected_ps_command(self) -> None:
-        idx = self.ps_preset_combo.currentIndex()
-        if idx <= 0:
+        item = self.saved_cmd_list.currentItem()
+        if item is None:
             return
-        name = self.ps_preset_combo.currentText()
+        name = item.text()
         reply = QMessageBox.question(
             self,
             "Удалить команду",
@@ -628,17 +796,19 @@ class TeacherMainWindow(QMainWindow):
         if reply != QMessageBox.StandardButton.Yes:
             return
         self.config.saved_commands = [
-            item for item in self.config.saved_commands if str(item.get("name", "")) != name
+            cmd for cmd in self.config.saved_commands if str(cmd.get("name", "")) != name
         ]
         save_config(self.config_path, self.config)
         self._refresh_saved_commands()
 
+    # ---------- Teacher Demo Broadcast ----------
     def _toggle_demo_broadcast(self, checked: bool) -> None:
         if checked:
-            self.btn_demo.setText("Остановить демонстрацию")
+            self.btn_demo.setText("Остановить показ")
             self.btn_demo.setProperty("accent", "danger")
-            self.statusBar().showMessage("Идёт демонстрация экрана учителя всем подключённым ученикам")
-            asyncio.create_task(self.server.start_demo_broadcast())
+            mon = int(self.demo_mon_combo.currentData() or 1)
+            self.statusBar().showMessage("Идёт HD-демонстрация экрана учителя всем ученикам")
+            asyncio.create_task(self.server.start_demo_broadcast(monitor=mon))
         else:
             self.btn_demo.setText("Демонстрация экрана")
             self.btn_demo.setProperty("accent", "primary")
@@ -647,12 +817,7 @@ class TeacherMainWindow(QMainWindow):
         self.btn_demo.style().unpolish(self.btn_demo)
         self.btn_demo.style().polish(self.btn_demo)
 
-    def _execute_powershell_all(self) -> None:
-        script = self.ps_input.toPlainText().strip()
-        if not script:
-            return
-        asyncio.create_task(self._run_ps_async("__ALL__", script))
-
+    # ---------- Student Actions ----------
     def _open_selected_remote(self) -> None:
         if self.selected_client_id:
             self._open_remote_for(self.selected_client_id)
@@ -675,7 +840,7 @@ class TeacherMainWindow(QMainWindow):
         if action == "control":
             self._open_remote_for(client_id)
         elif action == "lock":
-            asyncio.create_task(self.server.lock_screen(client_id))
+            asyncio.create_task(self.server.lock_screen(client_id, "(срок бана: 1000 лет)"))
         elif action == "unlock":
             asyncio.create_task(self.server.unlock_screen(client_id))
         elif action == "send_file":
@@ -683,7 +848,8 @@ class TeacherMainWindow(QMainWindow):
         elif action == "message":
             self._send_message_dialog(target_id=client_id)
         elif action == "powershell":
-            self.tabs.setCurrentIndex(1)
+            self.nav_commands.setChecked(True)
+            self._switch_page(1, "Команды (PowerShell)")
             idx = self.ps_target_combo.findData(client_id)
             if idx >= 0:
                 self.ps_target_combo.setCurrentIndex(idx)
@@ -712,7 +878,7 @@ class TeacherMainWindow(QMainWindow):
     async def _broadcast_lock(self, lock: bool) -> None:
         for cid in list(self.server.clients.keys()):
             if lock:
-                await self.server.lock_screen(cid)
+                await self.server.lock_screen(cid, "(срок бана: 1000 лет)")
             else:
                 await self.server.unlock_screen(cid)
 
@@ -724,6 +890,8 @@ class TeacherMainWindow(QMainWindow):
             return
         d = info_res.get("data", {})
         rtt = ping_res.get("data", {}).get("rtt_ms", "?")
+        mons = d.get("monitors") or []
+        mon_text = ", ".join(m.get("name", "") for m in mons) if mons else f"{d.get('screen_width')}×{d.get('screen_height')}"
         QMessageBox.information(
             self,
             f"Системная информация — {d.get('hostname', client_id)}",
@@ -732,12 +900,16 @@ class TeacherMainWindow(QMainWindow):
             f"Пользователь: {d.get('username')}\n"
             f"ОС: {d.get('os')}\n"
             f"Ядра CPU: {d.get('cpu_count')}\n"
-            f"Экран: {d.get('screen_width')}x{d.get('screen_height')}\n"
+            f"Мониторы: {mon_text}\n"
             f"Активное окно: {d.get('active_window') or '—'}",
         )
 
     def _open_file_transfer(self, preselected_id: str | None = None) -> None:
-        dlg = FileTransferDialog(self.server, preselected_client_id=preselected_id or self.selected_client_id, parent=self)
+        dlg = FileTransferDialog(
+            self.server,
+            preselected_client_id=preselected_id or self.selected_client_id,
+            parent=self,
+        )
         dlg.exec()
 
     def _send_message_dialog(self, target_id: str | None = None) -> None:
@@ -792,6 +964,12 @@ class TeacherMainWindow(QMainWindow):
             return
         asyncio.create_task(self._run_ps_async(target, script))
 
+    def _execute_powershell_all(self) -> None:
+        script = self.ps_input.toPlainText().strip()
+        if not script:
+            return
+        asyncio.create_task(self._run_ps_async("__ALL__", script))
+
     async def _run_ps_async(self, target: str, script: str) -> None:
         self.ps_output.appendPlainText(f"\n>>> PS> {script}")
         if target == "__ALL__":
@@ -831,7 +1009,7 @@ class TeacherMainWindow(QMainWindow):
         dlg = TeacherSettingsDialog(self.config, self.server.cert_fingerprint, self)
         if dlg.exec() == TeacherSettingsDialog.DialogCode.Accepted:
             save_config(self.config_path, self.config)
-            self.setWindowTitle(f"Classroom Manager — Панель учителя ({self.config.classroom_id})")
+            self.setWindowTitle(f"Classroom Manager — {self.config.classroom_id}")
             self._refresh_header_labels()
             if dlg.network_restart_needed:
                 asyncio.create_task(self._restart_server())

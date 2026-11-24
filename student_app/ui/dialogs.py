@@ -37,7 +37,7 @@ class StudentPasswordPrompt(QDialog):
 
         layout = QVBoxLayout(self)
         title = QLabel(action_title)
-        title.setStyleSheet("font-size: 14px; font-weight: 700; color: #38bdf8;")
+        title.setStyleSheet("font-size: 14px; font-weight: 700;")
         layout.addWidget(title)
 
         self.pwd_edit = QLineEdit()
@@ -98,8 +98,8 @@ class StudentSettingsDialog(QDialog):
         if status_text:
             st = QLabel(f"Текущий статус: {status_text}")
             st.setStyleSheet(
-                "background-color: #1e293b; border: 1px solid #334155; "
-                "border-radius: 6px; padding: 8px; color: #93c5fd; font-weight: 600;"
+                "background-color: #181818; border: 1px solid #282828; "
+                "border-radius: 8px; padding: 8px; color: #1DB954; font-weight: 600;"
             )
             layout.addWidget(st)
 

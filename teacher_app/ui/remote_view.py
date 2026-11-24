@@ -1,4 +1,4 @@
-"""Full-resolution live screen viewer and remote mouse/keyboard control dialog."""
+"""Full-resolution live screen viewer, monitor switcher, quality selector, and remote control."""
 
 from __future__ import annotations
 
@@ -9,6 +9,7 @@ from typing import Any, Callable
 from PySide6.QtCore import QRect, Qt
 from PySide6.QtGui import QKeyEvent, QMouseEvent, QPixmap, QWheelEvent
 from PySide6.QtWidgets import (
+    QComboBox,
     QDialog,
     QHBoxLayout,
     QLabel,
@@ -21,7 +22,6 @@ from PySide6.QtWidgets import (
 from shared.protocol import ScreenMode
 from teacher_app.network.server import StudentSession, TeacherServer
 
-# Mapping of Qt special keys to Windows Virtual-Key (VK) codes
 QT_KEY_TO_VK: dict[int, int] = {
     int(Qt.Key.Key_Backspace): 0x08,
     int(Qt.Key.Key_Tab): 0x09,
@@ -59,6 +59,12 @@ QT_KEY_TO_VK: dict[int, int] = {
     int(Qt.Key.Key_F12): 0x7B,
 }
 
+QUALITY_PRESETS: list[tuple[str, int, int, float]] = [
+    ("HD Чёткое (1080p, 88%)", 1920, 88, 12.0),
+    ("Ультра 1:1 (Оригинал, 95%)", 0, 95, 10.0),
+    ("Быстрое (720p, 75%)", 1280, 75, 14.0),
+]
+
 
 class RemoteScreenCanvas(QLabel):
     """Displays student's screen and forwards mouse/keyboard events when control is active."""
@@ -67,17 +73,21 @@ class RemoteScreenCanvas(QLabel):
         super().__init__(parent)
         self._on_input = on_input
         self._control_enabled = False
+        self._monitor_index = 1
         self._source_pixmap: QPixmap | None = None
         self._image_rect = QRect()
         self._last_move_ts = 0.0
 
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
-        self.setMinimumSize(720, 420)
-        self.setStyleSheet("background-color: #020617; border: 1px solid #334155; border-radius: 6px;")
-        self.setText("Ожидание видеопотока от ученика...")
+        self.setMinimumSize(780, 450)
+        self.setStyleSheet("background-color: #000000; border: 1px solid #282828; border-radius: 10px;")
+        self.setText("Ожидание HD-видеопотока от ученика...")
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
+
+    def set_monitor_index(self, monitor_index: int) -> None:
+        self._monitor_index = int(monitor_index)
 
     def set_control_enabled(self, enabled: bool) -> None:
         self._control_enabled = enabled
@@ -133,12 +143,14 @@ class RemoteScreenCanvas(QLabel):
         if not self._control_enabled:
             return
         now = time.monotonic()
-        if now - self._last_move_ts < 0.035:  # ~28 Hz cap
+        if now - self._last_move_ts < 0.03:
             return
         coords = self._map_pos(event.position())
         if coords is not None:
             self._last_move_ts = now
-            self._on_input({"event": "mouse_move", "x": coords[0], "y": coords[1]})
+            self._on_input(
+                {"event": "mouse_move", "x": coords[0], "y": coords[1], "monitor": self._monitor_index}
+            )
 
     def mousePressEvent(self, event: QMouseEvent) -> None:
         self.setFocus()
@@ -147,7 +159,15 @@ class RemoteScreenCanvas(QLabel):
         coords = self._map_pos(event.position())
         btn = self._qt_button_name(event.button())
         if coords is not None and btn:
-            self._on_input({"event": "mouse_down", "button": btn, "x": coords[0], "y": coords[1]})
+            self._on_input(
+                {
+                    "event": "mouse_down",
+                    "button": btn,
+                    "x": coords[0],
+                    "y": coords[1],
+                    "monitor": self._monitor_index,
+                }
+            )
 
     def mouseReleaseEvent(self, event: QMouseEvent) -> None:
         if not self._control_enabled:
@@ -155,7 +175,15 @@ class RemoteScreenCanvas(QLabel):
         coords = self._map_pos(event.position())
         btn = self._qt_button_name(event.button())
         if coords is not None and btn:
-            self._on_input({"event": "mouse_up", "button": btn, "x": coords[0], "y": coords[1]})
+            self._on_input(
+                {
+                    "event": "mouse_up",
+                    "button": btn,
+                    "x": coords[0],
+                    "y": coords[1],
+                    "monitor": self._monitor_index,
+                }
+            )
 
     def wheelEvent(self, event: QWheelEvent) -> None:
         if not self._control_enabled:
@@ -175,7 +203,6 @@ class RemoteScreenCanvas(QLabel):
             mods & (Qt.KeyboardModifier.ControlModifier | Qt.KeyboardModifier.AltModifier)
         )
 
-        # Special keys or Ctrl/Alt shortcuts go via VK codes
         if qt_key in QT_KEY_TO_VK:
             self._on_input({"event": "key_down", "vk": QT_KEY_TO_VK[qt_key]})
             event.accept()
@@ -186,7 +213,6 @@ class RemoteScreenCanvas(QLabel):
             event.accept()
             return
 
-        # Printable Unicode characters (supports both Russian and English layouts!)
         text = event.text()
         if text and text.isprintable():
             self._on_input({"event": "key_text", "text": text})
@@ -217,42 +243,75 @@ class RemoteScreenCanvas(QLabel):
 
 
 class RemoteControlDialog(QDialog):
-    """Live view and interactive remote control window for one student PC."""
+    """Live HD viewer, multi-monitor switcher, and interactive remote control window."""
 
     def __init__(self, server: TeacherServer, session: StudentSession, parent=None) -> None:
         super().__init__(parent)
         self.server = server
         self.client_id = session.client_id
-        self.setWindowTitle(f"Просмотр и управление — {session.label} ({session.ip})")
-        self.resize(1100, 680)
+        self.setWindowTitle(f"Управление ПК — {session.label} ({session.ip})")
+        self.resize(1220, 740)
 
         layout = QVBoxLayout(self)
+        layout.setSpacing(10)
 
-        # Toolbar
+        # Top control bar
         bar = QHBoxLayout()
-        self.control_btn = QPushButton("Управление мышью и клавиатурой: ВЫКЛ")
+        bar.setSpacing(8)
+
+        self.control_btn = QPushButton("Управление: ВЫКЛ")
         self.control_btn.setCheckable(True)
         self.control_btn.toggled.connect(self._toggle_control)
 
-        lock_btn = QPushButton("Заблокировать экран")
-        lock_btn.setProperty("accent", "warning")
-        lock_btn.clicked.connect(lambda: asyncio.create_task(self.server.lock_screen(self.client_id)))
+        # Monitor selector (shows all student monitors + All Monitors)
+        self.monitor_combo = QComboBox()
+        self.monitor_combo.setMinimumWidth(190)
+        monitors = session.monitors or [
+            {"index": 1, "name": f"Монитор 1 ({session.screen_width}×{session.screen_height})"}
+        ]
+        for mon in monitors:
+            idx = int(mon.get("index", 1))
+            name = str(mon.get("name") or f"Монитор {idx}")
+            self.monitor_combo.addItem(name, idx)
+        if len(monitors) > 1:
+            self.monitor_combo.addItem("Все мониторы сразу", 0)
+        cur_idx = self.monitor_combo.findData(session.active_monitor)
+        if cur_idx >= 0:
+            self.monitor_combo.setCurrentIndex(cur_idx)
+        self.monitor_combo.currentIndexChanged.connect(self._apply_stream_settings)
 
-        unlock_btn = QPushButton("Разблокировать")
+        # Quality selector
+        self.quality_combo = QComboBox()
+        for label, w, q, fps in QUALITY_PRESETS:
+            self.quality_combo.addItem(label, (w, q, fps))
+        self.quality_combo.currentIndexChanged.connect(self._apply_stream_settings)
+
+        lock_btn = QPushButton("Забанить экран")
+        lock_btn.setProperty("accent", "warning")
+        lock_btn.clicked.connect(
+            lambda: asyncio.create_task(self.server.lock_screen(self.client_id, "(срок бана: 1000 лет)"))
+        )
+
+        unlock_btn = QPushButton("Разбанить")
         unlock_btn.setProperty("accent", "success")
         unlock_btn.clicked.connect(lambda: asyncio.create_task(self.server.unlock_screen(self.client_id)))
 
-        lock_os_btn = QPushButton("Блок Windows")
+        lock_os_btn = QPushButton("Блок Win")
         lock_os_btn.clicked.connect(lambda: self._confirm_power("lock_os", "Заблокировать сеанс Windows?"))
 
         reboot_btn = QPushButton("Перезагрузка")
         reboot_btn.clicked.connect(lambda: self._confirm_power("reboot", "Перезагрузить этот ПК?"))
 
-        shutdown_btn = QPushButton("Выключить ПК")
+        shutdown_btn = QPushButton("Выключить")
         shutdown_btn.setProperty("accent", "danger")
         shutdown_btn.clicked.connect(lambda: self._confirm_power("shutdown", "Выключить этот ПК?"))
 
         bar.addWidget(self.control_btn)
+        bar.addSpacing(6)
+        bar.addWidget(QLabel("Экран:"))
+        bar.addWidget(self.monitor_combo)
+        bar.addWidget(QLabel("Качество:"))
+        bar.addWidget(self.quality_combo)
         bar.addStretch()
         bar.addWidget(lock_btn)
         bar.addWidget(unlock_btn)
@@ -262,33 +321,47 @@ class RemoteControlDialog(QDialog):
         layout.addLayout(bar)
 
         self.canvas = RemoteScreenCanvas(self._send_input)
+        self.canvas.set_monitor_index(int(self.monitor_combo.currentData() or 1))
         layout.addWidget(self.canvas, stretch=1)
 
         self.info_label = QLabel(
-            f"ПК: {session.hostname} | Пользователь: {session.username} | IP: {session.ip} | "
-            "Совет: включите кнопку «Управление», чтобы кликать и печатать на этом компьютере."
+            f"ПК: {session.hostname}  •  Пользователь: {session.username}  •  IP: {session.ip}  •  "
+            f"Мониторов: {len(monitors)}  •  Включите «Управление», чтобы кликать и печатать на этом ПК."
         )
-        self.info_label.setStyleSheet("color: #94a3b8; font-size: 12px;")
+        self.info_label.setObjectName("MutedLabel")
         layout.addWidget(self.info_label)
 
-        # Request high-resolution live stream
+        self._apply_stream_settings()
+
+    def _apply_stream_settings(self) -> None:
+        mon_idx = int(self.monitor_combo.currentData() if self.monitor_combo.currentData() is not None else 1)
+        preset = self.quality_combo.currentData()
+        if preset:
+            width, quality, fps = preset
+        else:
+            width = self.server.config.live_width
+            quality = self.server.config.live_quality
+            fps = self.server.config.live_fps
+
+        self.canvas.set_monitor_index(mon_idx)
         asyncio.create_task(
             self.server.set_screen_mode(
                 self.client_id,
                 ScreenMode.LIVE,
-                fps=self.server.config.live_fps,
-                width=self.server.config.live_width,
-                quality=70,
+                fps=fps,
+                width=width,
+                quality=quality,
+                monitor=mon_idx,
             )
         )
 
     def _toggle_control(self, checked: bool) -> None:
         self.canvas.set_control_enabled(checked)
         if checked:
-            self.control_btn.setText("Управление мышью и клавиатурой: ВКЛ")
-            self.control_btn.setProperty("accent", "primary")
+            self.control_btn.setText("Управление: ВКЛ")
+            self.control_btn.setProperty("accent", "success")
         else:
-            self.control_btn.setText("Управление мышью и клавиатурой: ВЫКЛ")
+            self.control_btn.setText("Управление: ВЫКЛ")
             self.control_btn.setProperty("accent", "")
         self.control_btn.style().unpolish(self.control_btn)
         self.control_btn.style().polish(self.control_btn)
@@ -310,15 +383,16 @@ class RemoteControlDialog(QDialog):
         self.canvas.update_frame(jpeg_bytes)
 
     def closeEvent(self, event) -> None:
-        # Downgrade back to lightweight thumbnail stream
         mode = ScreenMode.THUMB if self.server.config.thumb_fps > 0 else ScreenMode.OFF
+        mon_idx = int(self.monitor_combo.currentData() if self.monitor_combo.currentData() is not None else 1)
         asyncio.create_task(
             self.server.set_screen_mode(
                 self.client_id,
                 mode,
                 fps=max(0.5, self.server.config.thumb_fps),
                 width=self.server.config.thumb_width,
-                quality=50,
+                quality=72,
+                monitor=mon_idx,
             )
         )
         super().closeEvent(event)

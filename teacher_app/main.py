@@ -12,17 +12,17 @@ from shared.config import TeacherConfig, get_app_data_dir, load_config, save_con
 from shared.logging_setup import setup_logging
 from teacher_app.ui.dialogs import TeacherLoginDialog, TeacherSetupWizardDialog
 from teacher_app.ui.main_window import ServerSignals, TeacherMainWindow
-from teacher_app.ui.theme import DARK_STYLE
+from teacher_app.ui.theme import get_stylesheet
 
 
 def main() -> int:
     app = QApplication(sys.argv)
     app.setApplicationName("ClassroomManager Teacher")
-    app.setStyleSheet(DARK_STYLE)
 
     data_dir = get_app_data_dir("teacher")
     config_path = data_dir / "config.json"
     config = load_config(config_path, TeacherConfig)
+    app.setStyleSheet(get_stylesheet(config.theme))
 
     # First-run setup or password login
     if not config.initialized or not config.password_hash:

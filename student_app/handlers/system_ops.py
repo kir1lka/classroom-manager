@@ -12,6 +12,8 @@ import subprocess
 import sys
 from typing import Any
 
+from student_app.handlers.screen_capture import list_monitors
+
 
 def get_active_window_title() -> str:
     """Return the title of the currently focused Windows window."""
@@ -53,6 +55,7 @@ def get_system_info() -> dict[str, Any]:
         "cpu_count": os.cpu_count() or 1,
         "screen_width": w,
         "screen_height": h,
+        "monitors": list_monitors(),
         "active_window": get_active_window_title(),
     }
 

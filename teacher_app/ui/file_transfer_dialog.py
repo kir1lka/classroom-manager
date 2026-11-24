@@ -52,8 +52,8 @@ class FileTransferDialog(QDialog):
 
         layout = QVBoxLayout(self)
 
-        title = QLabel("Отправка файлов на компьютеры учеников (по защищённому TLS)")
-        title.setStyleSheet("font-size: 14px; font-weight: 700; color: #38bdf8;")
+        title = QLabel("Отправка файлов на компьютеры учеников (TLS + SHA-256)")
+        title.setStyleSheet("font-size: 15px; font-weight: 700;")
         layout.addWidget(title)
 
         # File picker list
@@ -70,9 +70,6 @@ class FileTransferDialog(QDialog):
 
         self.file_list = QListWidget()
         self.file_list.setMaximumHeight(110)
-        self.file_list.setStyleSheet(
-            "background-color: #0b1220; border: 1px solid #334155; border-radius: 6px; padding: 4px;"
-        )
         layout.addWidget(self.file_list)
 
         # Target & destination form
@@ -118,11 +115,9 @@ class FileTransferDialog(QDialog):
         layout.addWidget(self.progress)
 
         self.log_box = QPlainTextEdit()
+        self.log_box.setObjectName("ConsoleBox")
         self.log_box.setReadOnly(True)
         self.log_box.setPlaceholderText("Здесь появится статус доставки файлов по каждому компьютеру...")
-        self.log_box.setStyleSheet(
-            'background-color: #020617; color: #cbd5e1; font-family: "Consolas", monospace; font-size: 12px;'
-        )
         layout.addWidget(self.log_box, stretch=1)
 
         # Action buttons

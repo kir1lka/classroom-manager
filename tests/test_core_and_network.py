@@ -30,10 +30,12 @@ from shared.security import (
     verify_session_hmac,
 )
 from student_app.handlers.router import CommandRouter
+from student_app.handlers.screen_capture import capture_screen_jpeg, list_monitors
 from student_app.network.client import StudentClient
 from student_app.network.discovery import discover_teacher_udp
 from student_app.ui.hotkey import parse_hotkey_string
 from teacher_app.network.server import TeacherServer
+from teacher_app.ui.theme import get_stylesheet
 
 
 def test_password_hashing_and_verification() -> None:
@@ -77,12 +79,35 @@ def test_protocol_helpers_and_hotkey_parser() -> None:
 
 def test_config_roundtrip(tmp_path: Path) -> None:
     t_path = tmp_path / "teacher.json"
-    t_cfg = TeacherConfig(initialized=True, classroom_id="Lab-3", class_secret="AAAA-BBBB-CCCC", tcp_port=50123)
+    t_cfg = TeacherConfig(
+        initialized=True,
+        classroom_id="Lab-3",
+        class_secret="AAAA-BBBB-CCCC",
+        tcp_port=50123,
+        theme="light",
+    )
+    t_cfg.saved_commands.append({"name": "Тест", "script": "Get-Date"})
     save_config(t_path, t_cfg)
     loaded = load_config(t_path, TeacherConfig)
     assert loaded.initialized is True
     assert loaded.classroom_id == "Lab-3"
     assert loaded.tcp_port == 50123
+    assert loaded.theme == "light"
+    assert any(c["name"] == "Тест" for c in loaded.saved_commands)
+
+
+def test_multimonitor_hd_capture_and_themes() -> None:
+    mons = list_monitors()
+    assert len(mons) >= 1
+    assert mons[0]["index"] == 1
+    w, h, jpg = capture_screen_jpeg(target_width=1920, quality=88, monitor_index=1)
+    assert w > 0 and h > 0
+    assert jpg.startswith(b"\xff\xd8")
+
+    dark_qss = get_stylesheet("dark")
+    light_qss = get_stylesheet("light")
+    assert "#121212" in dark_qss
+    assert "#F5F5F7" in light_qss
 
 
 @pytest.mark.asyncio

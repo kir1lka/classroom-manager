@@ -34,11 +34,15 @@ class TeacherConfig:
     tcp_port: int = 45455
     discovery_port: int = 45454
     discovery_enabled: bool = True
+    theme: str = "dark"
     thumb_fps: float = 1.0
-    live_fps: float = 8.0
-    thumb_width: int = 360
-    live_width: int = 1280
-    demo_fps: float = 6.0
+    live_fps: float = 12.0
+    thumb_width: int = 480
+    live_width: int = 1920
+    live_quality: int = 88
+    demo_fps: float = 10.0
+    demo_width: int = 1920
+    demo_quality: int = 88
     saved_commands: list[dict[str, str]] = field(
         default_factory=lambda: [
             {
