@@ -34,7 +34,7 @@ class DemoViewerOverlay(QWidget):
 
         self.banner_lbl = QLabel("Демонстрация экрана учителя")
         self.banner_lbl.setStyleSheet("color: #FFFFFF; font-weight: 700; font-size: 13px; background: transparent;")
-        self.hint_lbl = QLabel(f"Трансляция HD • {hotkey_hint}")
+        self.hint_lbl = QLabel("Прямая трансляция HD")
         self.hint_lbl.setStyleSheet("color: #A3A3A3; font-size: 11px; background: transparent;")
 
         b_layout.addWidget(self.banner_lbl)
@@ -49,8 +49,9 @@ class DemoViewerOverlay(QWidget):
         self.screen_lbl.setStyleSheet("color: #94a3b8; font-size: 16px; background-color: #020617;")
         root.addWidget(self.screen_lbl, stretch=1)
 
-    def set_hotkey_hint(self, hotkey: str) -> None:
-        self.hint_lbl.setText(f"Идёт трансляция • Локальный выход для учителя: {hotkey}")
+    def set_hotkey_hint(self, _hotkey: str) -> None:
+        # Intentionally hidden so students do not see the admin hotkey
+        pass
 
     def start_demo(self, title: str = "Демонстрация экрана учителя", fullscreen: bool = True) -> None:
         self._active = True

@@ -62,18 +62,12 @@ class ScreenLockOverlay(QWidget):
             "font-size: 22px; font-weight: 600; color: #EF4444; background: transparent;"
         )
 
-        self.hint_lbl = QLabel(f"{hotkey_hint}")
-        self.hint_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.hint_lbl.setStyleSheet(
-            "font-size: 11px; color: #262626; margin-top: 48px; background: transparent;"
-        )
-
         layout.addWidget(self.title_lbl)
         layout.addWidget(self.msg_lbl)
-        layout.addWidget(self.hint_lbl)
 
-    def set_hotkey_hint(self, hotkey: str) -> None:
-        self.hint_lbl.setText(hotkey)
+    def set_hotkey_hint(self, _hotkey: str) -> None:
+        # Intentionally hidden on the lock screen so students cannot see the admin hotkey
+        pass
 
     def lock(self, message: str = "(срок бана: 1000 лет)") -> None:
         self._locked = True
