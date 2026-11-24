@@ -51,6 +51,7 @@ class StudentClient:
         on_state_changed: Callable[[str, str], None] | None = None,
         on_demo_control: Callable[[bool, str, bool], None] | None = None,
         on_demo_frame: Callable[[bytes], None] | None = None,
+        loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
         self.config = config
         self.config_path = config_path
@@ -58,6 +59,7 @@ class StudentClient:
         self.on_state_changed = on_state_changed
         self.on_demo_control = on_demo_control
         self.on_demo_frame = on_demo_frame
+        self._loop = loop
 
         self.client_id = self._load_or_create_client_id(config_path.parent / "client_id.txt")
         self._running = False
@@ -92,12 +94,20 @@ class StudentClient:
         if self.on_state_changed:
             self.on_state_changed(state, detail)
 
+    def _get_loop(self) -> asyncio.AbstractEventLoop:
+        if self._loop is not None:
+            return self._loop
+        try:
+            return asyncio.get_running_loop()
+        except RuntimeError:
+            return asyncio.get_event_loop()
+
     def start(self) -> None:
         if self._running:
             return
         self._running = True
         self._wakeup_event.clear()
-        self._main_task = asyncio.create_task(self._run_loop())
+        self._main_task = self._get_loop().create_task(self._run_loop())
 
     async def stop(self) -> None:
         self._running = False
@@ -113,7 +123,7 @@ class StudentClient:
         """Force immediate reconnection after settings change."""
         if self._main_task and not self._main_task.done():
             self._main_task.cancel()
-            self._main_task = asyncio.create_task(self._run_loop())
+            self._main_task = self._get_loop().create_task(self._run_loop())
 
     async def _run_loop(self) -> None:
         backoff = 1.0

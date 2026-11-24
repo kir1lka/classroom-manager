@@ -37,11 +37,13 @@ class StudentTrayAgent(QObject):
         app: QApplication,
         config: StudentConfig,
         config_path: Path,
+        loop: asyncio.AbstractEventLoop | None = None,
     ) -> None:
         super().__init__()
         self.app = app
         self.config = config
         self.config_path = config_path
+        self._loop = loop
         self._dialog_open = False
 
         self.signals = StudentSignals()
@@ -68,6 +70,7 @@ class StudentTrayAgent(QObject):
             on_state_changed=self.signals.state_changed.emit,
             on_demo_control=self.signals.demo_control.emit,
             on_demo_frame=self.signals.demo_frame.emit,
+            loop=self._loop,
         )
 
         # System Tray Icon (no taskbar window)
@@ -164,7 +167,7 @@ class StudentTrayAgent(QObject):
             )
             if dlg.exec() == StudentSettingsDialog.DialogCode.Accepted:
                 if dlg.exit_requested:
-                    asyncio.create_task(self._shutdown())
+                    self._schedule(self._shutdown())
                     return
                 if dlg.unlock_requested:
                     self.router.screen_locked = False
@@ -179,6 +182,10 @@ class StudentTrayAgent(QObject):
         finally:
             self._dialog_open = False
 
+    def _schedule(self, coro) -> None:
+        loop = self._loop or asyncio.get_event_loop()
+        loop.create_task(coro)
+
     def _request_protected_exit(self) -> None:
         if self._dialog_open:
             return
@@ -189,7 +196,7 @@ class StudentTrayAgent(QObject):
                 "Остановить и закрыть агент ученика",
             )
             if prompt.exec() == StudentPasswordPrompt.DialogCode.Accepted:
-                asyncio.create_task(self._shutdown())
+                self._schedule(self._shutdown())
         finally:
             self._dialog_open = False
 

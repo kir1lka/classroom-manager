@@ -55,10 +55,10 @@ def main() -> int:
     loop = QEventLoop(app)
     asyncio.set_event_loop(loop)
 
-    agent = StudentTrayAgent(app, config, config_path)
-    agent.start()
+    agent = StudentTrayAgent(app, config, config_path, loop=loop)
 
     with loop:
+        loop.call_soon(agent.start)
         loop.run_forever()
 
     return 0
