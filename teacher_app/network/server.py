@@ -1,0 +1,483 @@
+"""Asyncio TLS server managing connected student agents."""
+
+from __future__ import annotations
+
+import asyncio
+import contextlib
+import logging
+import socket
+import time
+import uuid
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable
+
+from shared.config import TeacherConfig
+from shared.protocol import (
+    PROTOCOL_VERSION,
+    MessageType,
+    ProtocolError,
+    ScreenMode,
+    decode_json,
+    read_frame,
+    send_json,
+    unpack_screen_frame,
+)
+from shared.security import (
+    create_server_ssl_context,
+    ensure_tls_certificate,
+    generate_nonce,
+    verify_session_hmac,
+)
+from teacher_app.network.discovery import DiscoveryResponder
+
+logger = logging.getLogger("classroom_manager.teacher.server")
+
+AUTH_TIMEOUT_SEC = 10.0
+HEARTBEAT_TIMEOUT_SEC = 28.0
+
+
+@dataclass
+class StudentSession:
+    client_id: str
+    hostname: str
+    display_name: str
+    username: str
+    os_info: str
+    ip: str
+    screen_width: int
+    screen_height: int
+    writer: asyncio.StreamWriter
+    locked: bool = False
+    active_window: str = ""
+    connected_at: float = field(default_factory=time.time)
+    last_seen: float = field(default_factory=time.monotonic)
+    last_ping_ms: float | None = None
+    screen_mode: ScreenMode = ScreenMode.OFF
+    write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
+    pending_requests: dict[str, asyncio.Future[dict[str, Any]]] = field(default_factory=dict)
+
+    @property
+    def label(self) -> str:
+        return self.display_name or self.hostname
+
+
+class TeacherServer:
+    """Central TLS server and student session registry for the Teacher desktop app."""
+
+    def __init__(
+        self,
+        config: TeacherConfig,
+        data_dir: Path,
+        on_client_connected: Callable[[StudentSession], None] | None = None,
+        on_client_disconnected: Callable[[str], None] | None = None,
+        on_client_updated: Callable[[StudentSession], None] | None = None,
+        on_screen_frame: Callable[[str, int, int, ScreenMode, bytes], None] | None = None,
+    ) -> None:
+        self.config = config
+        self.data_dir = data_dir
+        self.cert_path = data_dir / "certs" / "teacher_cert.pem"
+        self.key_path = data_dir / "certs" / "teacher_key.pem"
+        self.cert_fingerprint = ""
+
+        self.clients: dict[str, StudentSession] = {}
+        self._server: asyncio.AbstractServer | None = None
+        self._discovery: DiscoveryResponder | None = None
+        self._watchdog_task: asyncio.Task[None] | None = None
+        self._client_tasks: set[asyncio.Task[None]] = set()
+        self._running = False
+
+        self.on_client_connected = on_client_connected
+        self.on_client_disconnected = on_client_disconnected
+        self.on_client_updated = on_client_updated
+        self.on_screen_frame = on_screen_frame
+
+    @property
+    def is_running(self) -> bool:
+        return self._running
+
+    @property
+    def bound_port(self) -> int:
+        if self._server and self._server.sockets:
+            return int(self._server.sockets[0].getsockname()[1])
+        return self.config.tcp_port
+
+    async def start(self) -> None:
+        if self._running:
+            return
+
+        self.cert_fingerprint = ensure_tls_certificate(
+            self.cert_path,
+            self.key_path,
+            common_name=socket.gethostname(),
+        )
+        ssl_ctx = create_server_ssl_context(self.cert_path, self.key_path)
+
+        self._server = await asyncio.start_server(
+            self._handle_connection,
+            host=self.config.bind_host,
+            port=self.config.tcp_port,
+            ssl=ssl_ctx,
+        )
+        self._running = True
+        logger.info(
+            "Teacher TLS server started on %s:%d (room=%s, cert=%s...)",
+            self.config.bind_host,
+            self.bound_port,
+            self.config.classroom_id,
+            self.cert_fingerprint[:23],
+        )
+
+        if self.config.discovery_enabled:
+            self._discovery = DiscoveryResponder(
+                discovery_port=self.config.discovery_port,
+                get_classroom_id=lambda: self.config.classroom_id,
+                get_class_secret=lambda: self.config.class_secret,
+                get_tcp_port=lambda: self.bound_port,
+                get_cert_fingerprint=lambda: self.cert_fingerprint,
+            )
+            try:
+                await self._discovery.start()
+            except OSError as exc:
+                logger.warning("Could not start UDP discovery on port %d: %s", self.config.discovery_port, exc)
+                self._discovery = None
+
+        self._watchdog_task = asyncio.create_task(self._heartbeat_watchdog())
+
+    async def stop(self) -> None:
+        self._running = False
+        if self._watchdog_task:
+            self._watchdog_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._watchdog_task
+            self._watchdog_task = None
+
+        if self._discovery:
+            await self._discovery.stop()
+            self._discovery = None
+
+        for session in list(self.clients.values()):
+            await self._close_session(session)
+
+        if self._server:
+            self._server.close()
+            await self._server.wait_closed()
+            self._server = None
+
+        for task in list(self._client_tasks):
+            task.cancel()
+        if self._client_tasks:
+            await asyncio.gather(*self._client_tasks, return_exceptions=True)
+        self._client_tasks.clear()
+        logger.info("Teacher TLS server stopped")
+
+    def _handle_connection(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        task = asyncio.create_task(self._client_lifecycle(reader, writer))
+        self._client_tasks.add(task)
+        task.add_done_callback(self._client_tasks.discard)
+
+    async def _client_lifecycle(
+        self,
+        reader: asyncio.StreamReader,
+        writer: asyncio.StreamWriter,
+    ) -> None:
+        peer = writer.get_extra_info("peername") or ("unknown", 0)
+        peer_ip = str(peer[0])
+        session: StudentSession | None = None
+
+        try:
+            # 1. Challenge-Response authentication over TLS
+            nonce = generate_nonce()
+            await send_json(
+                writer,
+                MessageType.AUTH_CHALLENGE,
+                {
+                    "nonce": nonce,
+                    "classroom_id": self.config.classroom_id,
+                    "server_name": socket.gethostname(),
+                    "protocol_version": PROTOCOL_VERSION,
+                },
+            )
+
+            msg_type, payload = await asyncio.wait_for(read_frame(reader), timeout=AUTH_TIMEOUT_SEC)
+            if msg_type != MessageType.AUTH_RESPONSE:
+                raise ProtocolError(f"Expected AUTH_RESPONSE, got {msg_type}")
+
+            auth_data = decode_json(payload)
+            req_room = str(auth_data.get("classroom_id", "")).strip()
+            candidate_hmac = str(auth_data.get("hmac", ""))
+
+            room_ok = req_room.lower() == self.config.classroom_id.strip().lower()
+            hmac_ok = verify_session_hmac(
+                self.config.class_secret,
+                self.config.classroom_id,
+                nonce,
+                candidate_hmac,
+            )
+            if not (room_ok and hmac_ok):
+                logger.warning("Rejected unauthenticated connection from %s (room=%s)", peer_ip, req_room)
+                await send_json(
+                    writer,
+                    MessageType.AUTH_RESULT,
+                    {"ok": False, "reason": "Неверный ключ класса или ID кабинета"},
+                )
+                return
+
+            client_id = str(auth_data.get("client_id") or uuid.uuid4())
+            session = StudentSession(
+                client_id=client_id,
+                hostname=str(auth_data.get("hostname") or peer_ip),
+                display_name=str(auth_data.get("display_name") or ""),
+                username=str(auth_data.get("username") or ""),
+                os_info=str(auth_data.get("os_info") or "Windows"),
+                ip=peer_ip,
+                screen_width=int(auth_data.get("screen_width") or 1920),
+                screen_height=int(auth_data.get("screen_height") or 1080),
+                writer=writer,
+            )
+
+            # Replace any stale connection with the same client_id
+            old = self.clients.get(client_id)
+            if old is not None:
+                await self._close_session(old)
+
+            self.clients[client_id] = session
+            await send_json(
+                writer,
+                MessageType.AUTH_RESULT,
+                {
+                    "ok": True,
+                    "server_name": socket.gethostname(),
+                    "classroom_id": self.config.classroom_id,
+                },
+            )
+            logger.info("Student connected: %s (%s) from %s", session.label, session.username, peer_ip)
+            if self.on_client_connected:
+                self.on_client_connected(session)
+
+            # Start thumbnail preview stream automatically if configured
+            if self.config.thumb_fps > 0:
+                await self.set_screen_mode(
+                    client_id,
+                    ScreenMode.THUMB,
+                    fps=self.config.thumb_fps,
+                    width=self.config.thumb_width,
+                    quality=50,
+                )
+
+            # 2. Main receive loop
+            while self._running:
+                msg_type, payload = await read_frame(reader)
+                session.last_seen = time.monotonic()
+
+                if msg_type == MessageType.HEARTBEAT:
+                    hb = decode_json(payload)
+                    session.locked = bool(hb.get("locked", False))
+                    session.active_window = str(hb.get("active_window", ""))
+                    async with session.write_lock:
+                        await send_json(writer, MessageType.HEARTBEAT_ACK, {"ts": hb.get("ts", 0)})
+                    if self.on_client_updated:
+                        self.on_client_updated(session)
+
+                elif msg_type == MessageType.CMD_RESPONSE:
+                    resp = decode_json(payload)
+                    req_id = str(resp.get("request_id", ""))
+                    fut = session.pending_requests.pop(req_id, None)
+                    if fut and not fut.done():
+                        fut.set_result(resp)
+
+                elif msg_type == MessageType.SCREEN_FRAME:
+                    width, height, mode, jpeg_bytes = unpack_screen_frame(payload)
+                    session.screen_width = width
+                    session.screen_height = height
+                    if self.on_screen_frame:
+                        self.on_screen_frame(session.client_id, width, height, mode, jpeg_bytes)
+
+        except (asyncio.IncompleteReadError, ConnectionError, OSError):
+            pass
+        except (asyncio.TimeoutError, ProtocolError) as exc:
+            logger.warning("Protocol/timeout error for %s: %s", peer_ip, exc)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            logger.exception("Unexpected error in student handler (%s): %s", peer_ip, exc)
+        finally:
+            if session is not None:
+                await self._cleanup_session(session)
+            else:
+                writer.close()
+                with contextlib.suppress(Exception):
+                    await writer.wait_closed()
+
+    async def _close_session(self, session: StudentSession) -> None:
+        session.writer.close()
+        with contextlib.suppress(Exception):
+            await session.writer.wait_closed()
+
+    async def _cleanup_session(self, session: StudentSession) -> None:
+        if self.clients.get(session.client_id) is session:
+            del self.clients[session.client_id]
+            logger.info("Student disconnected: %s (%s)", session.label, session.ip)
+            if self.on_client_disconnected:
+                self.on_client_disconnected(session.client_id)
+
+        for fut in session.pending_requests.values():
+            if not fut.done():
+                fut.set_result({"ok": False, "error": "Ученик отключился"})
+        session.pending_requests.clear()
+
+        session.writer.close()
+        with contextlib.suppress(Exception):
+            await session.writer.wait_closed()
+
+    async def _heartbeat_watchdog(self) -> None:
+        while self._running:
+            await asyncio.sleep(5.0)
+            now = time.monotonic()
+            for session in list(self.clients.values()):
+                if now - session.last_seen > HEARTBEAT_TIMEOUT_SEC:
+                    logger.warning("Heartbeat timeout for %s (%s), closing", session.label, session.ip)
+                    await self._close_session(session)
+
+    async def send_command(
+        self,
+        client_id: str,
+        command: str,
+        params: dict[str, Any] | None = None,
+        timeout: float = 30.0,
+    ) -> dict[str, Any]:
+        """Send an RPC command to a single student and await the response."""
+        session = self.clients.get(client_id)
+        if session is None:
+            return {"ok": False, "error": "Ученик не в сети"}
+
+        req_id = uuid.uuid4().hex
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+        session.pending_requests[req_id] = fut
+
+        try:
+            async with session.write_lock:
+                await send_json(
+                    session.writer,
+                    MessageType.CMD_REQUEST,
+                    {
+                        "request_id": req_id,
+                        "command": command,
+                        "params": params or {},
+                    },
+                )
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            session.pending_requests.pop(req_id, None)
+            return {"ok": False, "error": f"Таймаут ожидания ответа ({timeout:.0f} с)"}
+        except Exception as exc:
+            session.pending_requests.pop(req_id, None)
+            return {"ok": False, "error": str(exc)}
+
+    async def broadcast_command(
+        self,
+        command: str,
+        params: dict[str, Any] | None = None,
+        timeout: float = 30.0,
+        client_ids: list[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Send an RPC command to multiple (or all) connected students in parallel."""
+        targets = client_ids if client_ids is not None else list(self.clients.keys())
+        if not targets:
+            return {}
+        results = await asyncio.gather(
+            *(self.send_command(cid, command, params, timeout=timeout) for cid in targets)
+        )
+        return dict(zip(targets, results))
+
+    async def ping_client(self, client_id: str) -> dict[str, Any]:
+        t0 = time.perf_counter()
+        res = await self.send_command(client_id, "PING", timeout=5.0)
+        if res.get("ok"):
+            ms = round((time.perf_counter() - t0) * 1000.0, 1)
+            res.setdefault("data", {})["rtt_ms"] = ms
+            session = self.clients.get(client_id)
+            if session:
+                session.last_ping_ms = ms
+                if self.on_client_updated:
+                    self.on_client_updated(session)
+        return res
+
+    async def run_powershell(self, client_id: str, script: str, timeout: float = 30.0) -> dict[str, Any]:
+        logger.info("Audit: sending PowerShell command to %s: %s", client_id, script[:120])
+        return await self.send_command(
+            client_id,
+            "POWERSHELL",
+            {"script": script, "timeout": timeout},
+            timeout=timeout + 5.0,
+        )
+
+    async def lock_screen(self, client_id: str, message: str = "Внимание на учителя! Экран заблокирован.") -> dict[str, Any]:
+        res = await self.send_command(client_id, "LOCK_SCREEN", {"message": message}, timeout=10.0)
+        if res.get("ok") and client_id in self.clients:
+            self.clients[client_id].locked = True
+            if self.on_client_updated:
+                self.on_client_updated(self.clients[client_id])
+        return res
+
+    async def unlock_screen(self, client_id: str) -> dict[str, Any]:
+        res = await self.send_command(client_id, "UNLOCK_SCREEN", timeout=10.0)
+        if res.get("ok") and client_id in self.clients:
+            self.clients[client_id].locked = False
+            if self.on_client_updated:
+                self.on_client_updated(self.clients[client_id])
+        return res
+
+    async def power_action(self, client_id: str, action: str) -> dict[str, Any]:
+        logger.info("Audit: sending power action '%s' to %s", action, client_id)
+        return await self.send_command(client_id, "POWER_ACTION", {"action": action}, timeout=10.0)
+
+    async def show_message(self, client_id: str, title: str, text: str) -> dict[str, Any]:
+        return await self.send_command(
+            client_id,
+            "SHOW_MESSAGE",
+            {"title": title, "text": text},
+            timeout=10.0,
+        )
+
+    async def set_screen_mode(
+        self,
+        client_id: str,
+        mode: ScreenMode,
+        fps: float,
+        width: int,
+        quality: int = 60,
+    ) -> None:
+        session = self.clients.get(client_id)
+        if session is None:
+            return
+        session.screen_mode = mode
+        try:
+            async with session.write_lock:
+                await send_json(
+                    session.writer,
+                    MessageType.SCREEN_CONTROL,
+                    {
+                        "mode": int(mode),
+                        "fps": float(fps),
+                        "width": int(width),
+                        "quality": int(quality),
+                    },
+                )
+        except Exception as exc:
+            logger.debug("Failed to send SCREEN_CONTROL to %s: %s", client_id, exc)
+
+    async def send_remote_input(self, client_id: str, event_payload: dict[str, Any]) -> None:
+        session = self.clients.get(client_id)
+        if session is None:
+            return
+        try:
+            async with session.write_lock:
+                await send_json(session.writer, MessageType.REMOTE_INPUT, event_payload)
+        except Exception as exc:
+            logger.debug("Failed to send REMOTE_INPUT to %s: %s", client_id, exc)

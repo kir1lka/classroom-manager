@@ -1,0 +1,241 @@
+"""Unit and end-to-end tests for protocol, TLS security, UDP discovery, PowerShell, and streaming."""
+
+from __future__ import annotations
+
+import asyncio
+from pathlib import Path
+
+import pytest
+
+from shared.config import StudentConfig, TeacherConfig, load_config, save_config
+from shared.protocol import (
+    MessageType,
+    ProtocolError,
+    ScreenMode,
+    decode_discovery_packet,
+    decode_json,
+    encode_discovery_packet,
+    pack_screen_frame,
+    read_frame,
+    send_json,
+    unpack_screen_frame,
+)
+from shared.security import (
+    compute_discovery_tag,
+    compute_session_hmac,
+    ensure_tls_certificate,
+    generate_class_secret,
+    hash_password,
+    verify_password,
+    verify_session_hmac,
+)
+from student_app.handlers.router import CommandRouter
+from student_app.network.client import StudentClient
+from student_app.network.discovery import discover_teacher_udp
+from student_app.ui.hotkey import parse_hotkey_string
+from teacher_app.network.server import TeacherServer
+
+
+def test_password_hashing_and_verification() -> None:
+    hashed = hash_password("TeacherPass!2026")
+    assert hashed.startswith("scrypt$")
+    assert verify_password("TeacherPass!2026", hashed) is True
+    assert verify_password("WrongPass", hashed) is False
+    assert verify_password("", hashed) is False
+
+
+def test_hmac_and_discovery_tag() -> None:
+    secret = generate_class_secret()
+    mac = compute_session_hmac(secret, "Cab-204", "nonce123")
+    assert verify_session_hmac(secret, "cab-204", "nonce123", mac) is True
+    assert verify_session_hmac(secret, "cab-204", "other_nonce", mac) is False
+    assert verify_session_hmac("wrong-secret", "cab-204", "nonce123", mac) is False
+
+    tag1 = compute_discovery_tag("Cab-204", secret)
+    tag2 = compute_discovery_tag("cab-204", secret)
+    assert tag1 == tag2
+    assert secret not in tag1
+
+
+def test_protocol_helpers_and_hotkey_parser() -> None:
+    packed = pack_screen_frame(1920, 1080, ScreenMode.LIVE, b"\xff\xd8JPEGDATA\xff\xd9")
+    w, h, mode, jpg = unpack_screen_frame(packed)
+    assert (w, h, mode) == (1920, 1080, ScreenMode.LIVE)
+    assert jpg == b"\xff\xd8JPEGDATA\xff\xd9"
+
+    raw = encode_discovery_packet({"type": "DISCOVER", "classroom_id": "Cab-101"})
+    decoded = decode_discovery_packet(raw)
+    assert decoded == {"type": "DISCOVER", "classroom_id": "Cab-101"}
+    assert decode_discovery_packet(b"GARBAGE") is None
+
+    parsed = parse_hotkey_string("Ctrl+Alt+Shift+M")
+    assert parsed is not None
+    assert parsed[1] == ord("M")
+    assert parse_hotkey_string("Ctrl+F12") is not None
+    assert parse_hotkey_string("InvalidKeyName") is None
+
+
+def test_config_roundtrip(tmp_path: Path) -> None:
+    t_path = tmp_path / "teacher.json"
+    t_cfg = TeacherConfig(initialized=True, classroom_id="Lab-3", class_secret="AAAA-BBBB-CCCC", tcp_port=50123)
+    save_config(t_path, t_cfg)
+    loaded = load_config(t_path, TeacherConfig)
+    assert loaded.initialized is True
+    assert loaded.classroom_id == "Lab-3"
+    assert loaded.tcp_port == 50123
+
+
+@pytest.mark.asyncio
+async def test_fragmented_frame_reading() -> None:
+    reader = asyncio.StreamReader()
+    # Feed a valid frame 1 byte at a time to verify stream framing resilience
+    payload = b'{"hello":"world"}'
+    from shared.protocol import HEADER_STRUCT
+
+    raw = HEADER_STRUCT.pack(len(payload), int(MessageType.HEARTBEAT)) + payload
+    for byte in raw:
+        reader.feed_data(bytes([byte]))
+    reader.feed_eof()
+
+    msg_type, data = await read_frame(reader)
+    assert msg_type == MessageType.HEARTBEAT
+    assert decode_json(data) == {"hello": "world"}
+
+
+@pytest.mark.asyncio
+async def test_end_to_end_tls_discovery_commands_and_stream(tmp_path: Path) -> None:
+    teacher_dir = tmp_path / "teacher"
+    student_dir = tmp_path / "student"
+    secret = "TEST-KEY1-9999"
+    udp_port = 47891
+
+    t_cfg = TeacherConfig(
+        initialized=True,
+        password_hash=hash_password("1234"),
+        classroom_id="Cab-Test",
+        class_secret=secret,
+        bind_host="0.0.0.0",
+        tcp_port=0,  # OS assigns a free ephemeral port
+        discovery_port=udp_port,
+        discovery_enabled=True,
+        thumb_fps=2.0,
+        thumb_width=240,
+    )
+
+    connected_evt = asyncio.Event()
+    frame_evt = asyncio.Event()
+    received_frames: list[bytes] = []
+
+    server = TeacherServer(
+        config=t_cfg,
+        data_dir=teacher_dir,
+        on_client_connected=lambda _s: connected_evt.set(),
+        on_screen_frame=lambda _cid, _w, _h, _m, jpg: (received_frames.append(jpg), frame_evt.set()),
+    )
+    await server.start()
+
+    try:
+        # 1. Verify UDP LAN discovery finds the teacher's dynamic port automatically
+        found = await discover_teacher_udp("Cab-Test", secret, udp_port, timeout=2.0)
+        assert found is not None
+        assert found.port == server.bound_port
+        assert found.cert_fingerprint == server.cert_fingerprint
+
+        # Wrong room or secret should NOT be answered
+        wrong = await discover_teacher_udp("Cab-Test", "WRONG-KEY", udp_port, timeout=0.4)
+        assert wrong is None
+
+        # 2. Start StudentClient relying ONLY on UDP auto-discovery (no manual IP!)
+        locked_messages: list[str] = []
+        unlocked_flag = False
+
+        def _on_unlock() -> None:
+            nonlocal unlocked_flag
+            unlocked_flag = True
+
+        s_cfg = StudentConfig(
+            initialized=True,
+            admin_password_hash=hash_password("1234"),
+            classroom_id="Cab-Test",
+            class_secret=secret,
+            discovery_enabled=True,
+            discovery_port=udp_port,
+            manual_host="",
+            pinned_fingerprint=server.cert_fingerprint,
+            display_name="Парта-07",
+        )
+        router = CommandRouter(
+            on_lock_screen=locked_messages.append,
+            on_unlock_screen=_on_unlock,
+        )
+        client = StudentClient(s_cfg, student_dir / "config.json", router)
+        client.start()
+
+        try:
+            await asyncio.wait_for(connected_evt.wait(), timeout=6.0)
+            assert len(server.clients) == 1
+            cid = next(iter(server.clients.keys()))
+            assert server.clients[cid].label == "Парта-07"
+
+            # 3. PING & System Info
+            ping_res = await server.ping_client(cid)
+            assert ping_res["ok"] is True
+            assert "rtt_ms" in ping_res["data"]
+
+            info_res = await server.send_command(cid, "GET_SYSTEM_INFO")
+            assert info_res["ok"] is True
+            assert info_res["data"]["hostname"]
+
+            # 4. Screen Lock / Unlock
+            lock_res = await server.lock_screen(cid, "Внимание на доску!")
+            assert lock_res["ok"] is True
+            assert locked_messages == ["Внимание на доску!"]
+            assert server.clients[cid].locked is True
+
+            unlock_res = await server.unlock_screen(cid)
+            assert unlock_res["ok"] is True
+            assert unlocked_flag is True
+            assert server.clients[cid].locked is False
+
+            # 5. PowerShell execution with Russian UTF-8 output
+            ps_res = await server.run_powershell(cid, "Write-Output 'Привет класс 2026'", timeout=15.0)
+            assert ps_res["ok"] is True
+            assert ps_res["data"]["returncode"] == 0
+            assert "Привет класс 2026" in ps_res["data"]["stdout"]
+
+            # 6. Verify thumbnail JPEG stream arrives automatically
+            await asyncio.wait_for(frame_evt.wait(), timeout=5.0)
+            assert len(received_frames) >= 1
+            assert received_frames[0].startswith(b"\xff\xd8")  # valid JPEG magic header
+
+            # 7. Verify unauthenticated client with wrong secret is rejected
+            bad_cfg = StudentConfig(
+                initialized=True,
+                admin_password_hash=hash_password("1234"),
+                classroom_id="Cab-Test",
+                class_secret="BAD-SECRET-0000",
+                discovery_enabled=False,
+                manual_host="127.0.0.1",
+                manual_port=server.bound_port,
+            )
+            bad_states: list[str] = []
+            bad_client = StudentClient(
+                bad_cfg,
+                tmp_path / "bad_student" / "config.json",
+                CommandRouter(),
+                on_state_changed=lambda st, _d: bad_states.append(st),
+            )
+            bad_client.start()
+            try:
+                for _ in range(30):
+                    if "AUTH_ERROR" in bad_states:
+                        break
+                    await asyncio.sleep(0.1)
+                assert "AUTH_ERROR" in bad_states
+                assert len(server.clients) == 1  # still only the legitimate student
+            finally:
+                await bad_client.stop()
+        finally:
+            await client.stop()
+    finally:
+        await server.stop()
