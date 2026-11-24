@@ -10,6 +10,7 @@ venv/
 # PyInstaller build artifacts
 build/
 dist/
+Student_Pack/
 *.spec
 
 # Local runtime secrets, certs & configs (never commit!)
