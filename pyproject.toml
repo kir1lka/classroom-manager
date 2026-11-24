@@ -1,7 +1,7 @@
 [project]
 name = "classroom-manager"
-version = "0.2.0"
-description = "Secure Windows LAN Classroom Management Suite (Teacher & Student Desktop Apps)"
+version = "2.0.0"
+description = "Modern Windows LAN Classroom Management Suite with iOS Liquid Glass UI (Teacher Console & Student Tray Agent)"
 requires-python = ">=3.11"
 
 [tool.pytest.ini_options]

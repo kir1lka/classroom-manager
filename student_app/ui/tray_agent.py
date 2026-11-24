@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from pathlib import Path
 
-from PySide6.QtCore import QObject, Signal
+from PySide6.QtCore import QObject, Qt, Signal
 from PySide6.QtGui import QAction
 from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 
@@ -16,7 +16,12 @@ from student_app.ui.demo_overlay import DemoViewerOverlay
 from student_app.ui.dialogs import StudentPasswordPrompt, StudentSettingsDialog
 from student_app.ui.hotkey import Win32GlobalHotkey
 from student_app.ui.lock_overlay import ScreenLockOverlay
-from teacher_app.ui.theme import make_status_icon
+from teacher_app.ui.theme import (
+    apply_window_chrome,
+    make_app_icon,
+    make_icon,
+    make_status_icon,
+)
 
 
 class StudentSignals(QObject):
@@ -73,9 +78,9 @@ class StudentTrayAgent(QObject):
             loop=self._loop,
         )
 
-        # System Tray Icon (no taskbar window)
-        self.tray = QSystemTrayIcon(make_status_icon("#f59e0b"), self)
-        self.tray.setToolTip("Classroom Student Agent")
+        # System Tray Icon (Liquid Glass status orb)
+        self.tray = QSystemTrayIcon(make_status_icon("#FF9F0A"), self)
+        self.tray.setToolTip("Classroom Student — запуск...")
 
         menu = QMenu()
         self.status_action = QAction("Статус: запуск...", menu)
@@ -83,11 +88,11 @@ class StudentTrayAgent(QObject):
         menu.addAction(self.status_action)
         menu.addSeparator()
 
-        settings_action = QAction("Настройки (по паролю)...", menu)
+        settings_action = QAction(make_icon("settings"), "Настройки (по паролю)...", menu)
         settings_action.triggered.connect(self._open_protected_settings)
         menu.addAction(settings_action)
 
-        exit_action = QAction("Выход (по паролю)...", menu)
+        exit_action = QAction(make_icon("power", "#FF453A"), "Выход (по паролю)...", menu)
         exit_action.triggered.connect(self._request_protected_exit)
         menu.addAction(exit_action)
 
@@ -109,16 +114,16 @@ class StudentTrayAgent(QObject):
 
     def _on_state_changed(self, state: str, detail: str) -> None:
         colors = {
-            "CONNECTED": "#10b981",
-            "DISCOVERING": "#f59e0b",
-            "CONNECTING": "#f59e0b",
-            "AUTHENTICATING": "#38bdf8",
-            "RECONNECTING": "#f59e0b",
-            "AUTH_ERROR": "#ef4444",
-            "UNCONFIGURED": "#ef4444",
-            "STOPPED": "#64748b",
+            "CONNECTED": "#30D158",
+            "DISCOVERING": "#FF9F0A",
+            "CONNECTING": "#FF9F0A",
+            "AUTHENTICATING": "#0A84FF",
+            "RECONNECTING": "#FF9F0A",
+            "AUTH_ERROR": "#FF453A",
+            "UNCONFIGURED": "#FF453A",
+            "STOPPED": "#64748B",
         }
-        self.tray.setIcon(make_status_icon(colors.get(state, "#64748b")))
+        self.tray.setIcon(make_status_icon(colors.get(state, "#64748B")))
         label = f"{detail or state} ({self.config.classroom_id})"
         self.status_action.setText(label)
         self.tray.setToolTip(f"Classroom Student — {label}")
@@ -143,9 +148,11 @@ class StudentTrayAgent(QObject):
     def _on_show_message(self, title: str, text: str) -> None:
         box = QMessageBox()
         box.setWindowTitle(title)
+        box.setWindowIcon(make_app_icon("student"))
         box.setText(text)
         box.setIcon(QMessageBox.Icon.Information)
-        box.setWindowFlags(box.windowFlags() | box.windowFlags().WindowStaysOnTopHint)
+        box.setWindowFlags(box.windowFlags() | Qt.WindowType.WindowStaysOnTopHint)
+        apply_window_chrome(box)
         box.exec()
 
     def _open_protected_settings(self) -> None:
@@ -155,15 +162,20 @@ class StudentTrayAgent(QObject):
         try:
             prompt = StudentPasswordPrompt(
                 self.config.admin_password_hash,
-                "Открыть настройки агента ученика",
+                "Открыть настройки рабочего места",
             )
             if prompt.exec() != StudentPasswordPrompt.DialogCode.Accepted:
                 return
 
+            status_str = (
+                f"{self.client.state} — {self.client.state_detail}"
+                if self.client.state_detail
+                else self.client.state
+            )
             dlg = StudentSettingsDialog(
                 self.config,
                 first_run=False,
-                status_text=f"{self.client.state} — {self.client.state_detail}",
+                status_text=status_str,
             )
             if dlg.exec() == StudentSettingsDialog.DialogCode.Accepted:
                 if dlg.exit_requested:

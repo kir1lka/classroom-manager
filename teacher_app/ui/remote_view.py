@@ -1,4 +1,4 @@
-"""Full-resolution live screen viewer, monitor switcher, quality selector, and remote control."""
+"""Full-resolution live screen viewer, monitor switcher, quality selector, and remote control (Liquid Glass HUD)."""
 
 from __future__ import annotations
 
@@ -6,13 +6,13 @@ import asyncio
 import time
 from typing import Any, Callable
 
-from PySide6.QtCore import QRect, Qt
-from PySide6.QtGui import QKeyEvent, QMouseEvent, QPixmap, QWheelEvent
+from PySide6.QtCore import QRect, QSize, Qt
+from PySide6.QtGui import QAction, QKeyEvent, QMouseEvent, QPixmap, QWheelEvent
 from PySide6.QtWidgets import (
     QComboBox,
-    QDialog,
     QHBoxLayout,
     QLabel,
+    QMenu,
     QMessageBox,
     QPushButton,
     QSizePolicy,
@@ -21,6 +21,13 @@ from PySide6.QtWidgets import (
 
 from shared.protocol import ScreenMode
 from teacher_app.network.server import StudentSession, TeacherServer
+from teacher_app.ui.theme import (
+    GlassFrame,
+    LiquidDialog,
+    get_tokens,
+    make_app_icon,
+    make_icon,
+)
 
 QT_KEY_TO_VK: dict[int, int] = {
     int(Qt.Key.Key_Backspace): 0x08,
@@ -81,8 +88,14 @@ class RemoteScreenCanvas(QLabel):
         self.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
         self.setMinimumSize(780, 450)
-        self.setStyleSheet("background-color: #000000; border: 1px solid #282828; border-radius: 10px;")
-        self.setText("Ожидание HD-видеопотока от ученика...")
+        self.setStyleSheet(
+            "background-color: #050811; "
+            "border: 1px solid rgba(255, 255, 255, 0.12); "
+            "border-radius: 14px; "
+            "color: #8B9BB4; "
+            "font-size: 13px;"
+        )
+        self.setText("Ожидание HD-видеопотока от компьютера ученика...")
         self.setMouseTracking(True)
         self.setFocusPolicy(Qt.FocusPolicy.StrongFocus)
 
@@ -242,12 +255,13 @@ class RemoteScreenCanvas(QLabel):
             event.accept()
 
 
-class RemoteControlDialog(QDialog):
+class RemoteControlDialog(LiquidDialog):
     """Live HD viewer, multi-monitor switcher, and interactive remote control window."""
 
     def __init__(self, server: TeacherServer, session: StudentSession, parent=None) -> None:
         super().__init__(parent)
         self.server = server
+        self._session = session
         self.client_id = session.client_id
         self.setWindowFlags(
             Qt.WindowType.Window
@@ -255,26 +269,47 @@ class RemoteControlDialog(QDialog):
             | Qt.WindowType.WindowMaximizeButtonHint
             | Qt.WindowType.WindowCloseButtonHint
         )
+        self.setWindowIcon(make_app_icon("teacher"))
         self.setWindowTitle(f"Управление ПК — {session.label} ({session.ip})")
         self.resize(1280, 760)
 
+        tokens = get_tokens()
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(16, 14, 16, 12)
         layout.setSpacing(10)
 
-        # Top control bar
-        bar = QHBoxLayout()
+        # Floating Liquid Glass HUD Top Bar
+        hud_frame = GlassFrame(variant="bar", radius=16)
+        bar = QHBoxLayout(hud_frame)
+        bar.setContentsMargins(14, 9, 14, 9)
         bar.setSpacing(8)
 
+        # Workstation badge (label + IP pill)
+        ws_title = QLabel(session.label)
+        ws_title.setStyleSheet("font-weight: 700; font-size: 13px;")
+        ws_ip = QLabel(session.ip)
+        ws_ip.setObjectName("AccentBadge")
+        bar.addWidget(ws_title)
+        bar.addWidget(ws_ip)
+        bar.addSpacing(4)
+
+        # Interactive remote control toggle
         self.control_btn = QPushButton("Управление: ВЫКЛ")
         self.control_btn.setCheckable(True)
+        self.control_btn.setIcon(make_icon("remote", size=15))
+        self.control_btn.setIconSize(QSize(15, 15))
+        self.control_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.control_btn.toggled.connect(self._toggle_control)
+        bar.addWidget(self.control_btn)
 
-        # Monitor selector (shows all student monitors + All Monitors)
+        # Compact Monitor selector
         self.monitor_combo = QComboBox()
-        self.monitor_combo.setMinimumWidth(190)
+        self.monitor_combo.setMinimumWidth(165)
+        self.monitor_combo.setToolTip("Выбор монитора ученика")
         monitors = session.monitors or [
             {"index": 1, "name": f"Монитор 1 ({session.screen_width}×{session.screen_height})"}
         ]
+        self._monitor_count = len(monitors)
         for mon in monitors:
             idx = int(mon.get("index", 1))
             name = str(mon.get("name") or f"Монитор {idx}")
@@ -285,67 +320,108 @@ class RemoteControlDialog(QDialog):
         if cur_idx >= 0:
             self.monitor_combo.setCurrentIndex(cur_idx)
         self.monitor_combo.currentIndexChanged.connect(self._apply_stream_settings)
+        bar.addWidget(self.monitor_combo)
 
-        # Quality selector
+        # Compact Quality selector
         self.quality_combo = QComboBox()
+        self.quality_combo.setMinimumWidth(175)
+        self.quality_combo.setToolTip("Качество и частота видеопотока")
         for label, w, q, fps in QUALITY_PRESETS:
             self.quality_combo.addItem(label, (w, q, fps))
         self.quality_combo.currentIndexChanged.connect(self._apply_stream_settings)
+        bar.addWidget(self.quality_combo)
 
-        lock_btn = QPushButton("Забанить экран")
+        bar.addStretch()
+
+        # Right side uncluttered controls
+        self.fullscreen_btn = QPushButton("Во весь экран")
+        self.fullscreen_btn.setCheckable(True)
+        self.fullscreen_btn.setIcon(make_icon("maximize", size=15))
+        self.fullscreen_btn.setIconSize(QSize(15, 15))
+        self.fullscreen_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.fullscreen_btn.toggled.connect(self._toggle_fullscreen)
+
+        lock_btn = QPushButton("Блок экрана")
         lock_btn.setProperty("accent", "warning")
+        lock_btn.setIcon(make_icon("lock", tokens.danger, 15))
+        lock_btn.setIconSize(QSize(15, 15))
+        lock_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         lock_btn.clicked.connect(
             lambda: asyncio.create_task(self.server.lock_screen(self.client_id, "(срок бана: 1000 лет)"))
         )
 
-        unlock_btn = QPushButton("Разбанить")
-        unlock_btn.setProperty("accent", "success")
-        unlock_btn.clicked.connect(lambda: asyncio.create_task(self.server.unlock_screen(self.client_id)))
+        unlock_btn = QPushButton("Разблок")
+        unlock_btn.setIcon(make_icon("unlock", size=15))
+        unlock_btn.setIconSize(QSize(15, 15))
+        unlock_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        unlock_btn.clicked.connect(
+            lambda: asyncio.create_task(self.server.unlock_screen(self.client_id))
+        )
 
-        lock_os_btn = QPushButton("Блок Win")
-        lock_os_btn.clicked.connect(lambda: self._confirm_power("lock_os", "Заблокировать сеанс Windows?"))
+        power_btn = QPushButton("Питание ▾")
+        power_btn.setProperty("accent", "danger")
+        power_btn.setIcon(make_icon("power", "#FFFFFF", 15))
+        power_btn.setIconSize(QSize(15, 15))
+        power_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        power_btn.setMenu(self._build_power_menu())
 
-        reboot_btn = QPushButton("Перезагрузка")
-        reboot_btn.clicked.connect(lambda: self._confirm_power("reboot", "Перезагрузить этот ПК?"))
-
-        shutdown_btn = QPushButton("Выключить")
-        shutdown_btn.setProperty("accent", "danger")
-        shutdown_btn.clicked.connect(lambda: self._confirm_power("shutdown", "Выключить этот ПК?"))
-
-        self.fullscreen_btn = QPushButton("Во весь экран")
-        self.fullscreen_btn.setCheckable(True)
-        self.fullscreen_btn.toggled.connect(self._toggle_fullscreen)
-
-        bar.addWidget(self.control_btn)
-        bar.addSpacing(6)
-        bar.addWidget(QLabel("Экран:"))
-        bar.addWidget(self.monitor_combo)
-        bar.addWidget(QLabel("Качество:"))
-        bar.addWidget(self.quality_combo)
-        bar.addStretch()
         bar.addWidget(self.fullscreen_btn)
         bar.addWidget(lock_btn)
         bar.addWidget(unlock_btn)
-        bar.addWidget(lock_os_btn)
-        bar.addWidget(reboot_btn)
-        bar.addWidget(shutdown_btn)
-        layout.addLayout(bar)
+        bar.addWidget(power_btn)
+        layout.addWidget(hud_frame)
 
+        # Deep rounded viewport canvas
         self.canvas = RemoteScreenCanvas(self._send_input)
         self.canvas.set_monitor_index(int(self.monitor_combo.currentData() or 1))
         layout.addWidget(self.canvas, stretch=1)
 
-        self.info_label = QLabel(
-            f"ПК: {session.hostname}  •  Пользователь: {session.username}  •  IP: {session.ip}  •  "
-            f"Мониторов: {len(monitors)}  •  Включите «Управление», чтобы кликать и печатать на этом ПК."
-        )
+        # Subtle telemetry footer
+        self.info_label = QLabel()
         self.info_label.setObjectName("MutedLabel")
+        self._update_footer_label(False)
         layout.addWidget(self.info_label)
 
         self._apply_stream_settings()
 
+    def _build_power_menu(self) -> QMenu:
+        menu = QMenu(self)
+        act_lock = QAction(make_icon("lock", size=15), "Заблокировать Windows", self)
+        act_lock.triggered.connect(
+            lambda: self._confirm_power("lock_os", "Заблокировать сеанс Windows на этом ПК?")
+        )
+
+        act_reboot = QAction(make_icon("refresh", size=15), "Перезагрузить ПК", self)
+        act_reboot.triggered.connect(
+            lambda: self._confirm_power("reboot", "Перезагрузить этот компьютер?")
+        )
+
+        act_shutdown = QAction(make_icon("power", get_tokens().danger, 15), "Выключить ПК", self)
+        act_shutdown.triggered.connect(
+            lambda: self._confirm_power("shutdown", "Выключить этот компьютер?")
+        )
+
+        menu.addAction(act_lock)
+        menu.addAction(act_reboot)
+        menu.addSeparator()
+        menu.addAction(act_shutdown)
+        return menu
+
+    def _update_footer_label(self, control_active: bool) -> None:
+        mode_str = (
+            "Ввод мыши и клавиатуры АКТИВЕН"
+            if control_active
+            else "Режим наблюдения (включите «Управление», чтобы кликать и печатать)"
+        )
+        self.info_label.setText(
+            f"ПК: {self._session.hostname}  •  Пользователь: {self._session.username}  •  "
+            f"IP: {self._session.ip}  •  Мониторов: {self._monitor_count}  •  {mode_str}"
+        )
+
     def _apply_stream_settings(self) -> None:
-        mon_idx = int(self.monitor_combo.currentData() if self.monitor_combo.currentData() is not None else 1)
+        mon_idx = int(
+            self.monitor_combo.currentData() if self.monitor_combo.currentData() is not None else 1
+        )
         preset = self.quality_combo.currentData()
         if preset:
             width, quality, fps = preset
@@ -379,11 +455,14 @@ class RemoteControlDialog(QDialog):
         if checked:
             self.control_btn.setText("Управление: ВКЛ")
             self.control_btn.setProperty("accent", "success")
+            self.control_btn.setIcon(make_icon("remote", "#FFFFFF", 15))
         else:
             self.control_btn.setText("Управление: ВЫКЛ")
             self.control_btn.setProperty("accent", "")
+            self.control_btn.setIcon(make_icon("remote", size=15))
         self.control_btn.style().unpolish(self.control_btn)
         self.control_btn.style().polish(self.control_btn)
+        self._update_footer_label(checked)
 
     def _send_input(self, payload: dict[str, Any]) -> None:
         asyncio.create_task(self.server.send_remote_input(self.client_id, payload))
@@ -403,7 +482,9 @@ class RemoteControlDialog(QDialog):
 
     def closeEvent(self, event) -> None:
         mode = ScreenMode.THUMB if self.server.config.thumb_fps > 0 else ScreenMode.OFF
-        mon_idx = int(self.monitor_combo.currentData() if self.monitor_combo.currentData() is not None else 1)
+        mon_idx = int(
+            self.monitor_combo.currentData() if self.monitor_combo.currentData() is not None else 1
+        )
         asyncio.create_task(
             self.server.set_screen_mode(
                 self.client_id,

@@ -12,12 +12,15 @@ from shared.config import TeacherConfig, get_app_data_dir, load_config, save_con
 from shared.logging_setup import setup_logging
 from teacher_app.ui.dialogs import TeacherLoginDialog, TeacherSetupWizardDialog
 from teacher_app.ui.main_window import ServerSignals, TeacherMainWindow
-from teacher_app.ui.theme import get_stylesheet
+from teacher_app.ui.theme import get_stylesheet, make_app_icon, set_windows_app_id
 
 
 def main() -> int:
+    set_windows_app_id("ClassroomManager.Teacher.Console")
+
     app = QApplication(sys.argv)
     app.setApplicationName("ClassroomManager Teacher")
+    app.setWindowIcon(make_app_icon("teacher"))
 
     data_dir = get_app_data_dir("teacher")
     config_path = data_dir / "config.json"

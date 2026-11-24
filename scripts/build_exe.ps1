@@ -8,10 +8,33 @@ $ErrorActionPreference = "Stop"
 $ProjectRoot = Split-Path -Parent $PSScriptRoot
 Set-Location $ProjectRoot
 
+$Python = Join-Path $ProjectRoot ".venv\Scripts\python.exe"
+if (-not (Test-Path $Python)) {
+    $Python = "python"
+}
+
 $PyInstaller = Join-Path $ProjectRoot ".venv\Scripts\pyinstaller.exe"
 if (-not (Test-Path $PyInstaller)) {
     Write-Host "Устанавливаю PyInstaller в .venv..." -ForegroundColor Cyan
     & (Join-Path $ProjectRoot ".venv\Scripts\pip.exe") install pyinstaller
+}
+
+$TeacherIco = Join-Path $ProjectRoot "assets\teacher.ico"
+$StudentIco = Join-Path $ProjectRoot "assets\student.ico"
+if ((-not (Test-Path $TeacherIco)) -or (-not (Test-Path $StudentIco))) {
+    Write-Host "`nГенерация иконок приложений (assets\teacher.ico, assets\student.ico)..." -ForegroundColor Cyan
+    $PrevQpa = $env:QT_QPA_PLATFORM
+    $env:QT_QPA_PLATFORM = "offscreen"
+    try {
+        & $Python (Join-Path $ProjectRoot "scripts\generate_icons.py")
+        if ($LASTEXITCODE -ne 0) { throw "generate_icons.py завершился с ошибкой ($LASTEXITCODE)" }
+    } finally {
+        if ($null -eq $PrevQpa) {
+            Remove-Item Env:\QT_QPA_PLATFORM -ErrorAction SilentlyContinue
+        } else {
+            $env:QT_QPA_PLATFORM = $PrevQpa
+        }
+    }
 }
 
 Write-Host "`n[1/2] Сборка ClassroomTeacher.exe..." -ForegroundColor Cyan
@@ -21,6 +44,8 @@ Write-Host "`n[1/2] Сборка ClassroomTeacher.exe..." -ForegroundColor Cyan
     --onefile `
     --windowed `
     --name "ClassroomTeacher" `
+    --icon "assets\teacher.ico" `
+    --add-data "assets;assets" `
     --paths "." `
     --hidden-import "qasync" `
     --hidden-import "cryptography" `
@@ -42,6 +67,8 @@ Write-Host "`n[2/2] Сборка ClassroomStudent.exe..." -ForegroundColor Cyan
     --onefile `
     --windowed `
     --name "ClassroomStudent" `
+    --icon "assets\student.ico" `
+    --add-data "assets;assets" `
     --paths "." `
     --hidden-import "qasync" `
     --hidden-import "cryptography" `

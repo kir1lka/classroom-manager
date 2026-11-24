@@ -14,7 +14,7 @@ from shared.config import StudentConfig, get_app_data_dir, load_config, save_con
 from shared.logging_setup import setup_logging
 from student_app.ui.dialogs import StudentSettingsDialog
 from student_app.ui.tray_agent import StudentTrayAgent
-from teacher_app.ui.theme import DARK_STYLE
+from teacher_app.ui.theme import get_stylesheet, make_app_icon, set_windows_app_id
 
 ERROR_ALREADY_EXISTS = 183
 
@@ -34,10 +34,13 @@ def main() -> int:
     if mutex is False:
         return 0
 
+    set_windows_app_id("ClassroomManager.Student.Agent")
+
     app = QApplication(sys.argv)
     app.setApplicationName("ClassroomManager Student")
+    app.setWindowIcon(make_app_icon("student"))
     app.setQuitOnLastWindowClosed(False)
-    app.setStyleSheet(DARK_STYLE)
+    app.setStyleSheet(get_stylesheet("dark"))
 
     data_dir = get_app_data_dir("student")
     config_path = data_dir / "config.json"
