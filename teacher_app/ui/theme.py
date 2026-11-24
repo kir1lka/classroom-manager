@@ -392,6 +392,9 @@ def get_stylesheet(theme: str = "dark") -> str:
     nav_active_fg = "#FFFFFF" if t.is_dark else "#005EC4"
     list_sel_bg = nav_active_bg
     list_sel_fg = nav_active_fg
+    disabled_bg = "rgba(255, 255, 255, 0.02)" if t.is_dark else "rgba(15, 23, 42, 0.035)"
+    disabled_fg = "rgba(148, 163, 184, 0.34)" if t.is_dark else "rgba(100, 116, 139, 0.42)"
+    disabled_border = "rgba(255, 255, 255, 0.07)" if t.is_dark else "rgba(15, 23, 42, 0.10)"
 
     return f"""
 /* Liquid Glass Theme ({t.name}) — fallback surface token {t.bg_alt} */
@@ -515,10 +518,16 @@ QPushButton:hover {{
 QPushButton:pressed {{
     background-color: {t.glass_pressed};
 }}
+QPushButton:checked {{
+    background-color: {nav_active_bg};
+    color: {nav_active_fg};
+    border: 1.5px solid {t.accent};
+    font-weight: 700;
+}}
 QPushButton:disabled {{
-    color: {t.text_muted};
-    background-color: transparent;
-    border-color: {t.glass_border};
+    color: {disabled_fg};
+    background-color: {disabled_bg};
+    border: 1px dashed {disabled_border};
 }}
 QPushButton#NavButton {{
     background-color: transparent;
@@ -553,6 +562,15 @@ QPushButton#IconPill:hover {{
     background-color: {t.glass_hover};
     border-color: {t.accent_border};
 }}
+QPushButton#IconPill:checked {{
+    background-color: {nav_active_bg};
+    border: 1.5px solid {t.accent};
+}}
+QPushButton#IconPill:disabled {{
+    background-color: {disabled_bg};
+    border: 1px dashed {disabled_border};
+    color: {disabled_fg};
+}}
 QPushButton[accent="primary"] {{
     background-color: {t.accent};
     color: #FFFFFF;
@@ -566,9 +584,9 @@ QPushButton[accent="primary"]:hover {{
     background-color: {t.accent_hover};
 }}
 QPushButton[accent="primary"]:disabled {{
-    background-color: {t.glass_bg};
-    color: {t.text_muted};
-    border-color: {t.glass_border};
+    background-color: {disabled_bg};
+    color: {disabled_fg};
+    border: 1px dashed {disabled_border};
 }}
 QPushButton[accent="success"] {{
     background-color: {t.success};
@@ -581,6 +599,11 @@ QPushButton[accent="success"] {{
 }}
 QPushButton[accent="success"]:hover {{
     background-color: {t.success_hover};
+}}
+QPushButton[accent="success"]:disabled {{
+    background-color: {disabled_bg};
+    color: {disabled_fg};
+    border: 1px dashed {disabled_border};
 }}
 QPushButton[accent="warning"] {{
     background-color: {t.danger_soft};
@@ -596,9 +619,9 @@ QPushButton[accent="warning"]:hover {{
     color: #FFFFFF;
 }}
 QPushButton[accent="warning"]:disabled {{
-    background-color: transparent;
-    color: {t.text_muted};
-    border-color: {t.glass_border};
+    background-color: {disabled_bg};
+    color: {disabled_fg};
+    border: 1px dashed {disabled_border};
 }}
 QPushButton[accent="danger"] {{
     background-color: {t.danger};
@@ -613,9 +636,9 @@ QPushButton[accent="danger"]:hover {{
     background-color: {t.danger_hover};
 }}
 QPushButton[accent="danger"]:disabled {{
-    background-color: {t.glass_bg};
-    color: {t.text_muted};
-    border-color: {t.glass_border};
+    background-color: {disabled_bg};
+    color: {disabled_fg};
+    border: 1px dashed {disabled_border};
 }}
 QPushButton[accent="ghost"] {{
     background-color: transparent;

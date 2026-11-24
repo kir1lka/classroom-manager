@@ -52,6 +52,7 @@ class StudentSession:
     screen_width: int
     screen_height: int
     writer: asyncio.StreamWriter
+    classroom_id: str = ""
     monitors: list[dict[str, Any]] = field(default_factory=list)
     active_monitor: int = 1
     locked: bool = False
@@ -150,6 +151,7 @@ class TeacherServer:
                 get_class_secret=lambda: self.config.class_secret,
                 get_tcp_port=lambda: self.bound_port,
                 get_cert_fingerprint=lambda: self.cert_fingerprint,
+                get_classrooms=self.config.ensure_classrooms,
             )
             try:
                 await self._discovery.start()
@@ -227,14 +229,17 @@ class TeacherServer:
             req_room = str(auth_data.get("classroom_id", "")).strip()
             candidate_hmac = str(auth_data.get("hmac", ""))
 
-            room_ok = req_room.lower() == self.config.classroom_id.strip().lower()
-            hmac_ok = verify_session_hmac(
-                self.config.class_secret,
-                self.config.classroom_id,
-                nonce,
-                candidate_hmac,
-            )
-            if not (room_ok and hmac_ok):
+            matched_room = ""
+            for room in self.config.ensure_classrooms():
+                rid = str(room.get("id", "")).strip()
+                sec = str(room.get("secret", "")).strip()
+                if not rid or not sec:
+                    continue
+                if req_room.lower() == rid.lower() and verify_session_hmac(sec, rid, nonce, candidate_hmac):
+                    matched_room = rid
+                    break
+
+            if not matched_room:
                 logger.warning("Rejected unauthenticated connection from %s (room=%s)", peer_ip, req_room)
                 await send_json(
                     writer,
@@ -253,8 +258,9 @@ class TeacherServer:
                 ip=peer_ip,
                 screen_width=int(auth_data.get("screen_width") or 1920),
                 screen_height=int(auth_data.get("screen_height") or 1080),
-                monitors=list(auth_data.get("monitors") or []),
                 writer=writer,
+                classroom_id=matched_room,
+                monitors=list(auth_data.get("monitors") or []),
             )
 
             # Replace any stale connection with the same client_id
@@ -269,10 +275,16 @@ class TeacherServer:
                 {
                     "ok": True,
                     "server_name": socket.gethostname(),
-                    "classroom_id": self.config.classroom_id,
+                    "classroom_id": matched_room,
                 },
             )
-            logger.info("Student connected: %s (%s) from %s", session.label, session.username, peer_ip)
+            logger.info(
+                "Student connected: %s (%s) from %s [room=%s]",
+                session.label,
+                session.username,
+                peer_ip,
+                matched_room,
+            )
             if self.on_client_connected:
                 self.on_client_connected(session)
 

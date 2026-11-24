@@ -30,6 +30,7 @@ class TeacherConfig:
     password_hash: str = ""
     classroom_id: str = "Cab-101"
     class_secret: str = ""
+    classrooms: list[dict[str, str]] = field(default_factory=list)
     bind_host: str = "0.0.0.0"
     tcp_port: int = 45455
     discovery_port: int = 45454
@@ -63,6 +64,75 @@ class TeacherConfig:
             },
         ]
     )
+
+    def ensure_classrooms(self) -> list[dict[str, str]]:
+        """Ensure at least the active classroom exists in `self.classrooms` and return normalized list."""
+        cleaned: list[dict[str, str]] = []
+        seen: set[str] = set()
+        for entry in self.classrooms:
+            if not isinstance(entry, dict):
+                continue
+            rid = str(entry.get("id", "")).strip()
+            sec = str(entry.get("secret", "")).strip()
+            if rid and rid.lower() not in seen:
+                cleaned.append({"id": rid, "secret": sec})
+                seen.add(rid.lower())
+
+        cur_id = (self.classroom_id or "Cab-101").strip()
+        cur_sec = (self.class_secret or "").strip()
+        if cur_id.lower() not in seen:
+            cleaned.insert(0, {"id": cur_id, "secret": cur_sec})
+        else:
+            for item in cleaned:
+                if item["id"].lower() == cur_id.lower():
+                    if cur_sec and item["secret"] != cur_sec:
+                        item["secret"] = cur_sec
+                    elif not cur_sec and item["secret"]:
+                        self.class_secret = item["secret"]
+                    self.classroom_id = item["id"]
+                    break
+        self.classrooms = cleaned
+        return self.classrooms
+
+    def add_or_update_classroom(self, room_id: str, secret: str) -> None:
+        rid = room_id.strip()
+        sec = secret.strip()
+        if not rid:
+            return
+        self.ensure_classrooms()
+        for item in self.classrooms:
+            if item["id"].lower() == rid.lower():
+                item["id"] = rid
+                item["secret"] = sec
+                if self.classroom_id.strip().lower() == rid.lower():
+                    self.classroom_id = rid
+                    self.class_secret = sec
+                return
+        self.classrooms.append({"id": rid, "secret": sec})
+
+    def set_active_classroom(self, room_id: str) -> bool:
+        rid = room_id.strip().lower()
+        self.ensure_classrooms()
+        for item in self.classrooms:
+            if item["id"].lower() == rid:
+                self.classroom_id = item["id"]
+                self.class_secret = item["secret"]
+                return True
+        return False
+
+    def remove_classroom(self, room_id: str) -> bool:
+        self.ensure_classrooms()
+        if len(self.classrooms) <= 1:
+            return False
+        rid = room_id.strip().lower()
+        remaining = [item for item in self.classrooms if item["id"].lower() != rid]
+        if len(remaining) == len(self.classrooms):
+            return False
+        self.classrooms = remaining
+        if self.classroom_id.strip().lower() == rid:
+            self.classroom_id = self.classrooms[0]["id"]
+            self.class_secret = self.classrooms[0]["secret"]
+        return True
 
 
 @dataclass

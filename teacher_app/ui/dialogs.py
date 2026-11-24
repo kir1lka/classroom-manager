@@ -623,9 +623,119 @@ class TeacherSettingsDialog(LiquidDialog):
 
         self.config.classroom_id = room
         self.config.class_secret = secret
+        self.config.add_or_update_classroom(room, secret)
+        self.config.set_active_classroom(room)
         self.config.tcp_port = self.tcp_spin.value()
         self.config.discovery_port = self.disc_spin.value()
         self.config.discovery_enabled = self.disc_check.isChecked()
         self.config.thumb_fps = self.thumb_fps_spin.value()
         self.config.live_fps = self.live_fps_spin.value()
+        self.accept()
+
+
+class AddClassroomDialog(LiquidDialog):
+    """Liquid Glass dialog for creating a new classroom with its own ID and PSK secret."""
+
+    def __init__(self, existing_ids: list[str], parent=None) -> None:
+        super().__init__(parent)
+        self._existing_lower = {rid.strip().lower() for rid in existing_ids if rid.strip()}
+        self.created_room_id = ""
+        self.created_secret = ""
+
+        self.setWindowTitle("Новый кабинет — Classroom Manager")
+        self.setWindowIcon(make_app_icon("teacher"))
+        self.setFixedWidth(460)
+        self.setModal(True)
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 22)
+        layout.setSpacing(14)
+
+        hdr = QHBoxLayout()
+        hdr.setSpacing(12)
+        logo = QLabel()
+        logo.setPixmap(make_brand_pixmap(40))
+        logo.setFixedSize(40, 40)
+        hdr.addWidget(logo)
+
+        hdr_text = QVBoxLayout()
+        hdr_text.setSpacing(2)
+        title = QLabel("Добавить кабинет")
+        title.setObjectName("DialogTitle")
+        sub = QLabel("Каждый кабинет получает свой ID и отдельный ключ доступа (PSK)")
+        sub.setObjectName("MutedLabel")
+        sub.setWordWrap(True)
+        hdr_text.addWidget(title)
+        hdr_text.addWidget(sub)
+        hdr.addLayout(hdr_text, stretch=1)
+        layout.addLayout(hdr)
+
+        card = GlassFrame(variant="card", radius=16)
+        cv = QVBoxLayout(card)
+        cv.setContentsMargins(18, 16, 18, 16)
+        cv.setSpacing(12)
+
+        form = QFormLayout()
+        form.setSpacing(10)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+
+        self.room_edit = QLineEdit()
+        self.room_edit.setPlaceholderText("Например: Cab-204 или Lab-IT")
+
+        secret_row = QHBoxLayout()
+        secret_row.setSpacing(6)
+        self.secret_edit = QLineEdit(generate_class_secret())
+        self.secret_edit.setPlaceholderText("Минимум 6 символов")
+
+        gen_btn = _make_icon_pill("refresh", "Сгенерировать новый ключ класса")
+        gen_btn.clicked.connect(lambda: self.secret_edit.setText(generate_class_secret()))
+
+        copy_btn = _make_icon_pill("copy", "Скопировать ключ класса")
+        copy_btn.clicked.connect(lambda: QApplication.clipboard().setText(self.secret_edit.text()))
+
+        secret_row.addWidget(self.secret_edit, stretch=1)
+        secret_row.addWidget(gen_btn)
+        secret_row.addWidget(copy_btn)
+
+        form.addRow("ID кабинета:", self.room_edit)
+        form.addRow("Ключ класса (PSK):", secret_row)
+        cv.addLayout(form)
+        layout.addWidget(card)
+
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        btn_row.addStretch()
+
+        cancel_btn = QPushButton("Отмена")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.clicked.connect(self.reject)
+
+        create_btn = QPushButton("Создать кабинет")
+        create_btn.setProperty("accent", "primary")
+        create_btn.setIcon(make_icon("plus", "#FFFFFF", 15))
+        create_btn.setIconSize(QSize(15, 15))
+        create_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        create_btn.setDefault(True)
+        create_btn.clicked.connect(self._on_create)
+
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(create_btn)
+        layout.addLayout(btn_row)
+
+        self.room_edit.setFocus()
+
+    def _on_create(self) -> None:
+        rid = self.room_edit.text().strip()
+        sec = self.secret_edit.text().strip()
+        if not rid:
+            QMessageBox.warning(self, "Ошибка", "Укажите ID нового кабинета (например, Cab-204).")
+            return
+        if rid.lower() in self._existing_lower:
+            QMessageBox.warning(self, "Ошибка", f"Кабинет «{rid}» уже существует.")
+            return
+        if len(sec) < 6:
+            QMessageBox.warning(self, "Ошибка", "Ключ класса должен содержать минимум 6 символов.")
+            return
+        self.created_room_id = rid
+        self.created_secret = sec
         self.accept()

@@ -129,7 +129,7 @@ class ScreenLockOverlay(QWidget):
         )
         layout.addWidget(self.title_lbl, alignment=Qt.AlignmentFlag.AlignCenter)
 
-        self.msg_lbl = QLabel("(срок бана: 1000 лет)")
+        self.msg_lbl = QLabel("срок бана: 1000 лет")
         self.msg_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.msg_lbl.setWordWrap(False)
         self.msg_lbl.setMaximumWidth(900)
@@ -154,11 +154,13 @@ class ScreenLockOverlay(QWidget):
         # Intentionally hidden on the lock screen so students cannot see the admin hotkey
         pass
 
-    def lock(self, message: str = "(срок бана: 1000 лет)") -> None:
+    def lock(self, message: str = "срок бана: 1000 лет") -> None:
         self._locked = True
         clean = (message or "").strip()
+        if clean.startswith("(") and clean.endswith(")") and len(clean) > 2:
+            clean = clean[1:-1].strip()
         if not clean or "Внимание на учителя" in clean:
-            clean = "(срок бана: 1000 лет)"
+            clean = "срок бана: 1000 лет"
         self.msg_lbl.setText(clean)
 
         screens = QGuiApplication.screens()

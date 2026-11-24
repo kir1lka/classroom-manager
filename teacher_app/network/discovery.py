@@ -44,11 +44,13 @@ class _DiscoveryProtocol(asyncio.DatagramProtocol):
         get_class_secret: Callable[[], str],
         get_tcp_port: Callable[[], int],
         get_cert_fingerprint: Callable[[], str],
+        get_classrooms: Callable[[], list[dict[str, str]]] | None = None,
     ) -> None:
         self._get_classroom_id = get_classroom_id
         self._get_class_secret = get_class_secret
         self._get_tcp_port = get_tcp_port
         self._get_cert_fingerprint = get_cert_fingerprint
+        self._get_classrooms = get_classrooms
         self.transport: asyncio.DatagramTransport | None = None
 
     def connection_made(self, transport: asyncio.BaseTransport) -> None:
@@ -59,19 +61,35 @@ class _DiscoveryProtocol(asyncio.DatagramProtocol):
         if not packet or packet.get("type") != "DISCOVER":
             return
 
-        classroom_id = self._get_classroom_id()
-        class_secret = self._get_class_secret()
-        expected_tag = compute_discovery_tag(classroom_id, class_secret)
-
         req_room = str(packet.get("classroom_id", "")).strip().lower()
         req_tag = str(packet.get("secret_tag", ""))
-        if req_room != classroom_id.strip().lower() or req_tag != expected_tag:
+
+        candidates = (
+            self._get_classrooms()
+            if self._get_classrooms is not None
+            else [{"id": self._get_classroom_id(), "secret": self._get_class_secret()}]
+        )
+
+        matched_room = ""
+        matched_tag = ""
+        for room in candidates:
+            rid = str(room.get("id", "")).strip()
+            sec = str(room.get("secret", "")).strip()
+            if not rid or not sec:
+                continue
+            expected_tag = compute_discovery_tag(rid, sec)
+            if req_room == rid.lower() and req_tag == expected_tag:
+                matched_room = rid
+                matched_tag = expected_tag
+                break
+
+        if not matched_room:
             return
 
         offer = {
             "type": "OFFER",
-            "classroom_id": classroom_id,
-            "secret_tag": expected_tag,
+            "classroom_id": matched_room,
+            "secret_tag": matched_tag,
             "tcp_port": self._get_tcp_port(),
             "server_name": socket.gethostname(),
             "cert_fingerprint": self._get_cert_fingerprint(),
@@ -79,7 +97,7 @@ class _DiscoveryProtocol(asyncio.DatagramProtocol):
         }
         if self.transport is not None:
             self.transport.sendto(encode_discovery_packet(offer), addr)
-            logger.debug("Replied to LAN discovery probe from %s:%s", addr[0], addr[1])
+            logger.debug("Replied to LAN discovery probe for room=%s from %s:%s", matched_room, addr[0], addr[1])
 
 
 class DiscoveryResponder:
@@ -92,12 +110,14 @@ class DiscoveryResponder:
         get_class_secret: Callable[[], str],
         get_tcp_port: Callable[[], int],
         get_cert_fingerprint: Callable[[], str],
+        get_classrooms: Callable[[], list[dict[str, str]]] | None = None,
     ) -> None:
         self.discovery_port = discovery_port
         self._get_classroom_id = get_classroom_id
         self._get_class_secret = get_class_secret
         self._get_tcp_port = get_tcp_port
         self._get_cert_fingerprint = get_cert_fingerprint
+        self._get_classrooms = get_classrooms
         self._transport: asyncio.DatagramTransport | None = None
 
     async def start(self) -> None:
@@ -114,6 +134,7 @@ class DiscoveryResponder:
                 self._get_class_secret,
                 self._get_tcp_port,
                 self._get_cert_fingerprint,
+                self._get_classrooms,
             ),
             sock=sock,
         )

@@ -347,7 +347,7 @@ class RemoteControlDialog(LiquidDialog):
         lock_btn.setIconSize(QSize(15, 15))
         lock_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         lock_btn.clicked.connect(
-            lambda: asyncio.create_task(self.server.lock_screen(self.client_id, "(срок бана: 1000 лет)"))
+            lambda: asyncio.create_task(self.server.lock_screen(self.client_id, "срок бана: 1000 лет"))
         )
 
         unlock_btn = QPushButton("Разблок")

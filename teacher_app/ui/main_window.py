@@ -35,7 +35,7 @@ from shared.config import TeacherConfig, save_config
 from student_app.handlers.screen_capture import list_monitors
 from teacher_app.network.discovery import get_local_ipv4_addresses
 from teacher_app.network.server import StudentSession, TeacherServer
-from teacher_app.ui.dialogs import TeacherSettingsDialog
+from teacher_app.ui.dialogs import AddClassroomDialog, TeacherSettingsDialog
 from teacher_app.ui.file_transfer_dialog import FileTransferDialog
 from teacher_app.ui.remote_view import RemoteControlDialog
 from teacher_app.ui.theme import (
@@ -325,9 +325,11 @@ class TeacherMainWindow(QMainWindow):
     ) -> None:
         super().__init__()
         self.config = config
+        self.config.ensure_classrooms()
         self.config_path = config_path
         self.data_dir = data_dir
         self.signals = signals
+        self._room_filter: str = self.config.classroom_id
 
         self.setWindowTitle(f"Classroom Manager — {config.classroom_id}")
         self.setWindowIcon(make_app_icon("teacher"))
@@ -395,7 +397,39 @@ class TeacherMainWindow(QMainWindow):
         brand_row.addWidget(self.online_pill, alignment=Qt.AlignmentFlag.AlignVCenter)
         sb.addLayout(brand_row)
 
-        sb.addSpacing(10)
+        sb.addSpacing(8)
+
+        # Multi-Classroom Switcher
+        rooms_lbl = QLabel("КАБИНЕТЫ")
+        rooms_lbl.setObjectName("SectionLabel")
+        sb.addWidget(rooms_lbl)
+
+        room_row = QHBoxLayout()
+        room_row.setSpacing(6)
+        self.classroom_combo = QComboBox()
+        self.classroom_combo.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.classroom_combo.currentIndexChanged.connect(self._on_classroom_changed)
+
+        self.btn_add_room = QPushButton()
+        self.btn_add_room.setObjectName("IconPill")
+        self.btn_add_room.setFixedSize(34, 34)
+        self.btn_add_room.setIconSize(QSize(16, 16))
+        self.btn_add_room.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_add_room.setToolTip("Добавить новый кабинет")
+        self.btn_add_room.clicked.connect(self._add_classroom_dialog)
+
+        self.btn_del_room = QPushButton()
+        self.btn_del_room.setObjectName("IconPill")
+        self.btn_del_room.setFixedSize(34, 34)
+        self.btn_del_room.setIconSize(QSize(15, 15))
+        self.btn_del_room.clicked.connect(self._delete_current_classroom)
+
+        room_row.addWidget(self.classroom_combo, stretch=1)
+        room_row.addWidget(self.btn_add_room)
+        room_row.addWidget(self.btn_del_room)
+        sb.addLayout(room_row)
+
+        sb.addSpacing(8)
 
         # Navigation Section
         nav_lbl = QLabel("РАЗДЕЛЫ")
@@ -849,11 +883,122 @@ class TeacherMainWindow(QMainWindow):
         root.addWidget(content, stretch=1)
 
         self.setCentralWidget(central)
+        self._refresh_classroom_combo()
         self._refresh_saved_commands()
         self._refresh_header_labels()
         self._refresh_icons()
         self._update_page_header()
         self._update_toolbar_state()
+
+    @staticmethod
+    def _set_btn_state(btn: QPushButton, enabled: bool, tooltip: str = "") -> None:
+        btn.setEnabled(enabled)
+        btn.setCursor(
+            Qt.CursorShape.PointingHandCursor if enabled else Qt.CursorShape.ForbiddenCursor
+        )
+        if tooltip:
+            btn.setToolTip(tooltip)
+
+    def _active_clients(self) -> dict[str, StudentSession]:
+        if self._room_filter == "__ALL_ROOMS__":
+            return dict(self.server.clients)
+        target = self._room_filter.strip().lower()
+        return {
+            cid: s
+            for cid, s in self.server.clients.items()
+            if not s.classroom_id or s.classroom_id.strip().lower() == target
+        }
+
+    def _room_online_count(self, room_id: str) -> int:
+        target = room_id.strip().lower()
+        return sum(
+            1
+            for s in self.server.clients.values()
+            if (s.classroom_id or self.config.classroom_id).strip().lower() == target
+        )
+
+    def _refresh_classroom_combo(self) -> None:
+        rooms = self.config.ensure_classrooms()
+        self.classroom_combo.blockSignals(True)
+        self.classroom_combo.clear()
+        for room in rooms:
+            rid = room["id"]
+            cnt = self._room_online_count(rid)
+            self.classroom_combo.addItem(f"{rid}  ({cnt})", rid)
+        if len(rooms) > 1:
+            self.classroom_combo.addItem(f"Все кабинеты  ({len(self.server.clients)})", "__ALL_ROOMS__")
+        idx = self.classroom_combo.findData(self._room_filter)
+        if idx < 0:
+            idx = self.classroom_combo.findData(self.config.classroom_id)
+        if idx < 0:
+            idx = 0
+        self.classroom_combo.setCurrentIndex(idx)
+        self._room_filter = str(self.classroom_combo.currentData() or self.config.classroom_id)
+        self.classroom_combo.blockSignals(False)
+
+    def _on_classroom_changed(self) -> None:
+        selected = str(self.classroom_combo.currentData() or "")
+        if not selected:
+            return
+        self._room_filter = selected
+        if selected != "__ALL_ROOMS__":
+            if self.config.set_active_classroom(selected):
+                save_config(self.config_path, self.config)
+            self.setWindowTitle(f"Classroom Manager — {self.config.classroom_id}")
+        else:
+            self.setWindowTitle("Classroom Manager — Все кабинеты")
+
+        active = self._active_clients()
+        if self.selected_client_id not in active:
+            self.selected_client_id = next(iter(active.keys()), None)
+        for cid, card in self.cards.items():
+            card.set_selected(cid == self.selected_client_id)
+
+        self._relayout_grid()
+        self._refresh_header_labels()
+        self._refresh_ps_targets()
+        self._update_toolbar_state()
+
+    def _add_classroom_dialog(self) -> None:
+        existing = [r["id"] for r in self.config.ensure_classrooms()]
+        dlg = AddClassroomDialog(existing, self)
+        if dlg.exec() != AddClassroomDialog.DialogCode.Accepted:
+            return
+        self.config.add_or_update_classroom(dlg.created_room_id, dlg.created_secret)
+        self.config.set_active_classroom(dlg.created_room_id)
+        save_config(self.config_path, self.config)
+        self._room_filter = dlg.created_room_id
+        self.setWindowTitle(f"Classroom Manager — {self.config.classroom_id}")
+        self._refresh_classroom_combo()
+        self._relayout_grid()
+        self._refresh_header_labels()
+        self._refresh_ps_targets()
+        self._update_toolbar_state()
+        self.statusBar().showMessage(f"Кабинет «{dlg.created_room_id}» создан и выбран активным", 4000)
+
+    def _delete_current_classroom(self) -> None:
+        rooms = self.config.ensure_classrooms()
+        if len(rooms) <= 1 or self._room_filter == "__ALL_ROOMS__":
+            return
+        rid = self._room_filter
+        reply = QMessageBox.question(
+            self,
+            "Удалить кабинет",
+            f"Удалить кабинет «{rid}» из списка?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        if self.config.remove_classroom(rid):
+            save_config(self.config_path, self.config)
+            self._room_filter = self.config.classroom_id
+            self.setWindowTitle(f"Classroom Manager — {self.config.classroom_id}")
+            self._refresh_classroom_combo()
+            self._relayout_grid()
+            self._refresh_header_labels()
+            self._refresh_ps_targets()
+            self._update_toolbar_state()
+            self.statusBar().showMessage(f"Кабинет «{rid}» удалён", 4000)
 
     def _make_nav_btn(self, text: str, icon_name: str, page_index: int, checked: bool = False) -> QPushButton:
         btn = QPushButton(text)
@@ -877,11 +1022,12 @@ class TeacherMainWindow(QMainWindow):
 
     def _update_page_header(self, explicit_title: str | None = None) -> None:
         idx = self.pages.currentIndex()
-        online = len(self.server.clients)
+        online = len(self._active_clients())
+        room_tag = "Все кабинеты" if self._room_filter == "__ALL_ROOMS__" else self.config.classroom_id
         if idx == 0:
-            self.page_title_lbl.setText(explicit_title or "Экраны класса")
+            self.page_title_lbl.setText(explicit_title or f"Экраны класса • {room_tag}")
             if online == 0:
-                self.page_subtitle_lbl.setText("Ожидание подключений в локальной сети")
+                self.page_subtitle_lbl.setText(f"Кабинет {room_tag} • Ожидание подключений в локальной сети")
             else:
                 self.page_subtitle_lbl.setText(f"Онлайн: {online} ПК • Двойной клик для HD-управления")
         elif idx == 1:
@@ -901,44 +1047,51 @@ class TeacherMainWindow(QMainWindow):
 
     def _refresh_icons(self) -> None:
         t = get_tokens(self.config.theme)
+        dim = "#3A475E" if t.is_dark else "#CBD5E1"
         self._refresh_nav_icons()
+
+        # Multi-classroom buttons
+        self.btn_add_room.setIcon(_themed_icon("plus", t.accent, dim, size=16))
+        self.btn_del_room.setIcon(_themed_icon("trash", t.danger, dim, size=15))
 
         # Sidebar quick actions
         if self.btn_demo.isChecked():
-            self.btn_demo.setIcon(_themed_icon("stop", "#FFFFFF", t.text_muted, size=17))
+            self.btn_demo.setIcon(_themed_icon("stop", "#FFFFFF", dim, size=17))
         else:
-            self.btn_demo.setIcon(_themed_icon("cast", "#FFFFFF", t.text_muted, size=17))
+            self.btn_demo.setIcon(_themed_icon("cast", "#FFFFFF", dim, size=17))
 
-        self.btn_files.setIcon(_themed_icon("send_file", t.text, t.text_muted, size=17))
-        self.btn_lock_all.setIcon(_themed_icon("lock", t.danger, t.text_muted, size=16))
-        self.btn_unlock_all.setIcon(_themed_icon("unlock", t.text, t.text_muted, size=16))
+        self.btn_files.setIcon(_themed_icon("send_file", t.text, dim, size=17))
+        self.btn_lock_all.setIcon(_themed_icon("lock", t.danger, dim, size=16))
+        self.btn_unlock_all.setIcon(_themed_icon("unlock", t.text, dim, size=16))
 
         # Connection pod & bottom bar
         secret_icon = "eye_off" if self.secret_toggle_btn.isChecked() else "eye"
-        self.secret_toggle_btn.setIcon(make_icon(secret_icon, t.text_secondary, size=15))
+        secret_col = t.accent if self.secret_toggle_btn.isChecked() else t.text_secondary
+        self.secret_toggle_btn.setIcon(make_icon(secret_icon, secret_col, size=15))
         self.copy_key_btn.setIcon(make_icon("copy", t.text, size=15))
         self.settings_btn.setIcon(make_icon("settings", t.text, size=16))
         self._update_theme_button()
 
         # Top glass bar contextual controls
         self._search_icon_action.setIcon(make_icon("search", t.text_muted, size=15))
-        self.btn_remote.setIcon(_themed_icon("remote", "#FFFFFF", t.text_muted, size=15))
-        self.btn_lock.setIcon(_themed_icon("lock", t.danger, t.text_muted, size=15))
-        self.btn_unlock.setIcon(_themed_icon("unlock", t.text, t.text_muted, size=15))
-        self.btn_msg.setIcon(_themed_icon("message", t.text, t.text_muted, size=15))
-        self.btn_ping.setIcon(_themed_icon("pulse", t.text, t.text_muted, size=15))
-        self.btn_power.setIcon(_themed_icon("power", "#FFFFFF", t.text_muted, size=15))
+        self.btn_remote.setIcon(_themed_icon("remote", "#FFFFFF", dim, size=15))
+        self.btn_lock.setIcon(_themed_icon("lock", t.danger, dim, size=15))
+        unlock_active_col = "#FFFFFF" if self.btn_unlock.property("accent") == "success" else t.text
+        self.btn_unlock.setIcon(_themed_icon("unlock", unlock_active_col, dim, size=15))
+        self.btn_msg.setIcon(_themed_icon("message", t.text, dim, size=15))
+        self.btn_ping.setIcon(_themed_icon("pulse", t.text, dim, size=15))
+        self.btn_power.setIcon(_themed_icon("power", "#FFFFFF", dim, size=15))
 
         # Empty state & PowerShell & Audit Log buttons
         self.empty_copy_key_btn.setIcon(make_icon("copy", "#FFFFFF", size=16))
-        self.save_cmd_btn.setIcon(_themed_icon("plus", "#FFFFFF", t.text_muted, size=15))
-        self.del_cmd_btn.setIcon(_themed_icon("trash", t.text, t.text_muted, size=15))
-        self.run_saved_all_btn.setIcon(_themed_icon("bolt", "#FFFFFF", t.text_muted, size=15))
-        self.run_ps_btn.setIcon(_themed_icon("play", "#FFFFFF", t.text_muted, size=15))
-        self.run_all_ps_btn.setIcon(_themed_icon("bolt", "#FFFFFF", t.text_muted, size=15))
-        self.clear_ps_btn.setIcon(_themed_icon("trash", t.text, t.text_muted, size=15))
-        self.btn_copy_log.setIcon(_themed_icon("copy", t.text, t.text_muted, size=15))
-        self.btn_clear_log.setIcon(_themed_icon("trash", t.text, t.text_muted, size=15))
+        self.save_cmd_btn.setIcon(_themed_icon("plus", "#FFFFFF", dim, size=15))
+        self.del_cmd_btn.setIcon(_themed_icon("trash", t.text, dim, size=15))
+        self.run_saved_all_btn.setIcon(_themed_icon("bolt", "#FFFFFF", dim, size=15))
+        self.run_ps_btn.setIcon(_themed_icon("play", "#FFFFFF", dim, size=15))
+        self.run_all_ps_btn.setIcon(_themed_icon("bolt", "#FFFFFF", dim, size=15))
+        self.clear_ps_btn.setIcon(_themed_icon("trash", t.text, dim, size=15))
+        self.btn_copy_log.setIcon(_themed_icon("copy", t.text, dim, size=15))
+        self.btn_clear_log.setIcon(_themed_icon("trash", t.text, dim, size=15))
 
         for card in self.cards.values():
             card.refresh_theme_icons()
@@ -1030,31 +1183,38 @@ class TeacherMainWindow(QMainWindow):
 
     def _refresh_header_labels(self) -> None:
         ips = ", ".join(get_local_ipv4_addresses())
-        online = len(self.server.clients)
+        active = self._active_clients()
+        online = len(active)
         self.online_pill.setText(f"{online} онлайн")
-        self.room_sub_lbl.setText(f"Кабинет • {self.config.classroom_id}")
+        room_label = "Все кабинеты" if self._room_filter == "__ALL_ROOMS__" else self.config.classroom_id
+        self.room_sub_lbl.setText(f"Кабинет • {room_label}")
 
         secret_disp = self.config.class_secret if self.secret_toggle_btn.isChecked() else "••••••••••••"
         self.net_info_lbl.setText(
+            f"Кабинет: {self.config.classroom_id}\n"
             f"LAN IP: {ips}\n"
-            f"TLS-порт: {self.server.bound_port}\n"
-            f"Ключ: {secret_disp}"
+            f"TLS-порт: {self.server.bound_port}  •  Ключ: {secret_disp}"
         )
 
         lan_status = "Автопоиск LAN активен" if self.config.discovery_enabled else "Ручное подключение по IP"
         self.empty_hint.setText(
-            f"Запустите агент ученика на компьютерах класса — они появятся здесь автоматически.\n\n"
+            f"Запустите агент ученика на компьютерах кабинета «{self.config.classroom_id}» — они появятся здесь автоматически.\n\n"
             f"ID кабинета: {self.config.classroom_id}   •   IP учителя: {ips}:{self.server.bound_port}\n"
             f"{lan_status}"
         )
+        self._refresh_classroom_combo()
         self._update_page_header()
 
     def _relayout_grid(self) -> None:
         while self.grid_layout.count():
             self.grid_layout.takeAt(0)
 
-        has_clients = bool(self.cards)
-        if not has_clients:
+        active = self._active_clients()
+        for cid, card in self.cards.items():
+            if cid not in active:
+                card.setVisible(False)
+
+        if not active:
             self.empty_state_wrap.setVisible(True)
             self.no_match_lbl.setVisible(False)
             self.scroll_area.setVisible(False)
@@ -1064,7 +1224,10 @@ class TeacherMainWindow(QMainWindow):
         query = self.search_input.text().strip().lower()
 
         matched: list[StudentCardWidget] = []
-        for card in self.cards.values():
+        for cid in active.keys():
+            card = self.cards.get(cid)
+            if card is None:
+                continue
             if card.matches_query(query):
                 card.setVisible(True)
                 matched.append(card)
@@ -1135,8 +1298,7 @@ class TeacherMainWindow(QMainWindow):
         card = self.cards.get(session.client_id)
         if card is not None:
             card.update_session(session)
-        if session.client_id == self.selected_client_id:
-            self._update_selected_badge()
+        self._update_toolbar_state()
         if self.search_input.text().strip():
             self._relayout_grid()
 
@@ -1158,7 +1320,7 @@ class TeacherMainWindow(QMainWindow):
         self._update_toolbar_state()
 
     def _update_selected_badge(self) -> None:
-        sess = self.server.clients.get(self.selected_client_id or "")
+        sess = self._active_clients().get(self.selected_client_id or "")
         if sess is not None:
             lbl = sess.label
             self.selected_badge_lbl.setText((lbl[:15] + "…") if len(lbl) > 16 else lbl)
@@ -1168,26 +1330,110 @@ class TeacherMainWindow(QMainWindow):
             self.selected_badge_lbl.setToolTip("")
 
     def _update_toolbar_state(self) -> None:
-        has_sel = self.selected_client_id in self.server.clients
-        has_any = bool(self.server.clients)
+        active = self._active_clients()
+        sel_sess = active.get(self.selected_client_id or "")
+        has_sel = sel_sess is not None
+        has_any = bool(active)
+        any_unlocked = any(not s.locked for s in active.values())
+        any_locked = any(s.locked for s in active.values())
         self._update_selected_badge()
 
-        self.btn_remote.setEnabled(has_sel)
-        self.btn_lock.setEnabled(has_sel)
-        self.btn_unlock.setEnabled(has_sel)
-        self.btn_ping.setEnabled(has_sel)
-        self.btn_lock_all.setEnabled(has_any)
-        self.btn_unlock_all.setEnabled(has_any)
-        self.btn_demo.setEnabled(has_any or self.btn_demo.isChecked())
-        self.btn_files.setEnabled(has_any)
-        self.btn_msg.setEnabled(has_any)
-        self.btn_power.setEnabled(has_any)
+        # Classroom delete pill state
+        can_del_room = len(self.config.ensure_classrooms()) > 1 and self._room_filter != "__ALL_ROOMS__"
+        self._set_btn_state(
+            self.btn_del_room,
+            can_del_room,
+            "Удалить текущий кабинет" if can_del_room else "Нельзя удалить единственный кабинет",
+        )
+
+        # Selected PC controls
+        self._set_btn_state(
+            self.btn_remote,
+            has_sel,
+            "Открыть HD-управление выбранным ПК" if has_sel else "Сначала выберите ПК ученика",
+        )
+        can_lock_sel = bool(sel_sess is not None and not sel_sess.locked)
+        self._set_btn_state(
+            self.btn_lock,
+            can_lock_sel,
+            "Заблокировать экран выбранного ПК"
+            if can_lock_sel
+            else ("Экран уже заблокирован" if has_sel else "Сначала выберите ПК ученика"),
+        )
+        can_unlock_sel = bool(sel_sess is not None and sel_sess.locked)
+        self.btn_unlock.setProperty("accent", "success" if can_unlock_sel else "")
+        self.btn_unlock.style().unpolish(self.btn_unlock)
+        self.btn_unlock.style().polish(self.btn_unlock)
+        t = get_tokens(self.config.theme)
+        dim = "#3A475E" if t.is_dark else "#CBD5E1"
+        self.btn_unlock.setIcon(_themed_icon("unlock", "#FFFFFF" if can_unlock_sel else t.text, dim, size=15))
+        self._set_btn_state(
+            self.btn_unlock,
+            can_unlock_sel,
+            "Разблокировать экран выбранного ПК"
+            if can_unlock_sel
+            else ("Экран этого ПК не заблокирован" if has_sel else "Сначала выберите ПК ученика"),
+        )
+        self._set_btn_state(
+            self.btn_ping,
+            has_sel,
+            "Пинг и системная информация ПК" if has_sel else "Сначала выберите ПК ученика",
+        )
+
+        # Classroom-wide actions
+        self._set_btn_state(
+            self.btn_lock_all,
+            any_unlocked,
+            "Заблокировать экраны всех открытых ПК"
+            if any_unlocked
+            else ("Все ПК уже заблокированы" if has_any else "Нет подключённых учеников"),
+        )
+        self._set_btn_state(
+            self.btn_unlock_all,
+            any_locked,
+            "Разблокировать все заблокированные ПК"
+            if any_locked
+            else ("Нет заблокированных ПК" if has_any else "Нет подключённых учеников"),
+        )
+        can_demo = has_any or self.btn_demo.isChecked()
+        self._set_btn_state(
+            self.btn_demo,
+            can_demo,
+            "Остановить трансляцию экрана"
+            if self.btn_demo.isChecked()
+            else ("Транслировать экран учителя всему классу" if has_any else "Нет подключённых учеников"),
+        )
+        self._set_btn_state(
+            self.btn_files,
+            has_any,
+            "Передать файлы на ПК учеников" if has_any else "Нет подключённых учеников",
+        )
+        self._set_btn_state(
+            self.btn_msg,
+            has_any,
+            "Отправить сообщение ученику или всему классу" if has_any else "Нет подключённых учеников",
+        )
+        self._set_btn_state(
+            self.btn_power,
+            has_any,
+            "Управление питанием ПК" if has_any else "Нет подключённых учеников",
+        )
+        self._set_btn_state(
+            self.run_all_ps_btn,
+            has_any,
+            "Выполнить скрипт на всех онлайн-ПК" if has_any else "Нет подключённых учеников",
+        )
+        self._set_btn_state(
+            self.run_saved_all_btn,
+            has_any,
+            "Запустить выбранную команду на всех онлайн-ПК" if has_any else "Нет подключённых учеников",
+        )
 
     def _refresh_ps_targets(self) -> None:
         current = self.ps_target_combo.currentData()
         self.ps_target_combo.clear()
         self.ps_target_combo.addItem("Весь класс (все онлайн-ПК)", "__ALL__")
-        for cid, s in self.server.clients.items():
+        for cid, s in self._active_clients().items():
             self.ps_target_combo.addItem(f"{s.label} ({s.ip})", cid)
         if current:
             idx = self.ps_target_combo.findData(current)
@@ -1318,7 +1564,7 @@ class TeacherMainWindow(QMainWindow):
         if action == "control":
             self._open_remote_for(client_id)
         elif action == "lock":
-            _spawn_task(self.server.lock_screen(client_id, "Экран заблокирован преподавателем"))
+            _spawn_task(self.server.lock_screen(client_id, "срок бана: 1000 лет"))
         elif action == "unlock":
             _spawn_task(self.server.unlock_screen(client_id))
         elif action == "send_file":
@@ -1354,9 +1600,9 @@ class TeacherMainWindow(QMainWindow):
         _spawn_task(self._broadcast_lock(False))
 
     async def _broadcast_lock(self, lock: bool) -> None:
-        for cid in list(self.server.clients.keys()):
+        for cid in list(self._active_clients().keys()):
             if lock:
-                await self.server.lock_screen(cid, "Экран заблокирован преподавателем")
+                await self.server.lock_screen(cid, "срок бана: 1000 лет")
             else:
                 await self.server.unlock_screen(cid)
 
@@ -1497,8 +1743,11 @@ class TeacherMainWindow(QMainWindow):
         dlg = TeacherSettingsDialog(self.config, self.server.cert_fingerprint, self)
         if dlg.exec() == TeacherSettingsDialog.DialogCode.Accepted:
             save_config(self.config_path, self.config)
+            if self._room_filter != "__ALL_ROOMS__":
+                self._room_filter = self.config.classroom_id
             self.setWindowTitle(f"Classroom Manager — {self.config.classroom_id}")
             self._refresh_header_labels()
+            self._update_toolbar_state()
             if dlg.network_restart_needed:
                 _spawn_task(self._restart_server())
 

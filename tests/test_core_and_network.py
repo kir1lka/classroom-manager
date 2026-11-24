@@ -96,6 +96,25 @@ def test_config_roundtrip(tmp_path: Path) -> None:
     assert any(c["name"] == "Тест" for c in loaded.saved_commands)
 
 
+def test_multi_classroom_config_management() -> None:
+    cfg = TeacherConfig(classroom_id="Cab-101", class_secret="KEY1-AAAA-1111")
+    rooms = cfg.ensure_classrooms()
+    assert len(rooms) == 1
+    assert rooms[0]["id"] == "Cab-101"
+
+    cfg.add_or_update_classroom("Cab-204", "KEY2-BBBB-2222")
+    assert len(cfg.classrooms) == 2
+    assert cfg.set_active_classroom("Cab-204") is True
+    assert cfg.classroom_id == "Cab-204"
+    assert cfg.class_secret == "KEY2-BBBB-2222"
+
+    assert cfg.remove_classroom("Cab-204") is True
+    assert len(cfg.classrooms) == 1
+    assert cfg.classroom_id == "Cab-101"
+    # Cannot remove the last remaining classroom
+    assert cfg.remove_classroom("Cab-101") is False
+
+
 def test_multimonitor_hd_capture_and_themes() -> None:
     mons = list_monitors()
     assert len(mons) >= 1
