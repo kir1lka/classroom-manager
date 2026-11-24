@@ -40,6 +40,16 @@ class MessageType(IntEnum):
     # Remote mouse/keyboard control
     REMOTE_INPUT = 40
 
+    # Chunked file transfer (Teacher -> Student)
+    FILE_START = 50
+    FILE_CHUNK = 51
+    FILE_END = 52
+    FILE_RESULT = 53
+
+    # Teacher screen demonstration broadcast (Teacher -> Students)
+    DEMO_CONTROL = 60
+    DEMO_FRAME = 61
+
 
 class ScreenMode(IntEnum):
     OFF = 0
@@ -106,6 +116,25 @@ def unpack_screen_frame(payload: bytes) -> tuple[int, int, ScreenMode, bytes]:
     except ValueError as exc:
         raise ProtocolError(f"Invalid screen mode: {raw_mode}") from exc
     return width, height, mode, payload[SCREEN_HEADER_STRUCT.size :]
+
+
+FILE_ID_LEN = 32
+
+
+def pack_file_chunk(transfer_id: str, chunk: bytes) -> bytes:
+    """Pack a 32-char hex transfer_id and raw file chunk bytes."""
+    tid_bytes = transfer_id.encode("ascii")
+    if len(tid_bytes) != FILE_ID_LEN:
+        raise ProtocolError(f"transfer_id must be {FILE_ID_LEN} ASCII chars")
+    return tid_bytes + chunk
+
+
+def unpack_file_chunk(payload: bytes) -> tuple[str, bytes]:
+    """Unpack a FILE_CHUNK payload into (transfer_id, chunk_bytes)."""
+    if len(payload) < FILE_ID_LEN:
+        raise ProtocolError("File chunk payload too short")
+    transfer_id = payload[:FILE_ID_LEN].decode("ascii", errors="strict")
+    return transfer_id, payload[FILE_ID_LEN:]
 
 
 def encode_discovery_packet(data: dict[str, Any]) -> bytes:

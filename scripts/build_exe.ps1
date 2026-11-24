@@ -24,6 +24,8 @@ Write-Host "`n[1/2] Сборка ClassroomTeacher.exe..." -ForegroundColor Cyan
     --paths "." `
     --hidden-import "qasync" `
     --hidden-import "cryptography" `
+    --hidden-import "mss" `
+    --hidden-import "PIL" `
     --exclude-module "PySide6.QtWebEngineCore" `
     --exclude-module "PySide6.QtWebEngineWidgets" `
     --exclude-module "PySide6.QtPdf" `

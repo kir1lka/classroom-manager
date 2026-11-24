@@ -32,6 +32,7 @@ from shared.protocol import ScreenMode
 from teacher_app.network.discovery import get_local_ipv4_addresses
 from teacher_app.network.server import StudentSession, TeacherServer
 from teacher_app.ui.dialogs import TeacherSettingsDialog
+from teacher_app.ui.file_transfer_dialog import FileTransferDialog
 from teacher_app.ui.remote_view import RemoteControlDialog
 from teacher_app.ui.theme import make_status_icon
 
@@ -152,6 +153,7 @@ class StudentCardWidget(QFrame):
             ("control", "Просмотр и управление ПК"),
             ("lock", "Заблокировать экран (внимание)"),
             ("unlock", "Разблокировать экран"),
+            ("send_file", "Передать файл на ПК..."),
             ("message", "Отправить сообщение"),
             ("powershell", "Открыть PowerShell для ПК"),
             ("ping", "Пинг и инфо о системе"),
@@ -261,8 +263,16 @@ class TeacherMainWindow(QMainWindow):
         self.btn_unlock_all = QPushButton("Разблок. ВСЕХ")
         self.btn_unlock_all.clicked.connect(self._unlock_all_students)
 
+        self.btn_demo = QPushButton("Демонстрация экрана")
+        self.btn_demo.setCheckable(True)
+        self.btn_demo.setProperty("accent", "primary")
+        self.btn_demo.toggled.connect(self._toggle_demo_broadcast)
+
         self.btn_msg = QPushButton("Сообщение")
         self.btn_msg.clicked.connect(self._send_message_dialog)
+
+        self.btn_files = QPushButton("Передать файл")
+        self.btn_files.clicked.connect(lambda: self._open_file_transfer())
 
         self.btn_ping = QPushButton("Пинг / Инфо")
         self.btn_ping.clicked.connect(lambda: self._run_on_selected("ping"))
@@ -274,10 +284,12 @@ class TeacherMainWindow(QMainWindow):
         toolbar.addWidget(self.btn_remote)
         toolbar.addWidget(self.btn_lock)
         toolbar.addWidget(self.btn_unlock)
-        toolbar.addSpacing(12)
+        toolbar.addSpacing(10)
         toolbar.addWidget(self.btn_lock_all)
         toolbar.addWidget(self.btn_unlock_all)
-        toolbar.addSpacing(12)
+        toolbar.addSpacing(10)
+        toolbar.addWidget(self.btn_demo)
+        toolbar.addWidget(self.btn_files)
         toolbar.addWidget(self.btn_msg)
         toolbar.addWidget(self.btn_ping)
         toolbar.addStretch()
@@ -321,17 +333,22 @@ class TeacherMainWindow(QMainWindow):
         self._refresh_ps_targets()
 
         self.ps_preset_combo = QComboBox()
-        self.ps_preset_combo.addItem("Быстрые команды (шаблоны)...", "")
-        self.ps_preset_combo.addItem("Имя ПК, пользователь и IP", "hostname; whoami; (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -notlike '127.*'}).IPAddress")
-        self.ps_preset_combo.addItem("Топ-10 процессов по памяти", "Get-Process | Sort-Object WS -Descending | Select-Object -First 10 Name, Id, @{N='MB';E={[math]::Round($_.WS/1MB,1)}} | Format-Table -AutoSize")
-        self.ps_preset_combo.addItem("Закрыть браузеры (Chrome/Edge)", "Stop-Process -Name chrome,msedge -Force -ErrorAction SilentlyContinue; 'Готово'")
-        self.ps_preset_combo.addItem("Проверить время работы ПК", "(Get-Date) - (Get-CimInstance Win32_OperatingSystem).LastBootUpTime")
         self.ps_preset_combo.currentIndexChanged.connect(self._apply_ps_preset)
+        self._refresh_saved_commands()
+
+        save_cmd_btn = QPushButton("Сохранить команду")
+        save_cmd_btn.clicked.connect(self._save_current_ps_command)
+
+        del_cmd_btn = QPushButton("Удалить")
+        del_cmd_btn.clicked.connect(self._delete_selected_ps_command)
 
         ps_top.addWidget(QLabel("Цель:"))
         ps_top.addWidget(self.ps_target_combo)
-        ps_top.addSpacing(12)
+        ps_top.addSpacing(10)
+        ps_top.addWidget(QLabel("Сохранённые:"))
         ps_top.addWidget(self.ps_preset_combo, stretch=1)
+        ps_top.addWidget(save_cmd_btn)
+        ps_top.addWidget(del_cmd_btn)
         ps_layout.addLayout(ps_top)
 
         self.ps_input = QPlainTextEdit()
@@ -341,12 +358,16 @@ class TeacherMainWindow(QMainWindow):
         ps_layout.addWidget(self.ps_input)
 
         ps_btns = QHBoxLayout()
-        run_ps_btn = QPushButton("Выполнить PowerShell")
+        run_ps_btn = QPushButton("Выполнить (выбранная цель)")
         run_ps_btn.setProperty("accent", "primary")
         run_ps_btn.clicked.connect(self._execute_powershell)
+        run_all_ps_btn = QPushButton("Запустить на ВСЕХ ПК")
+        run_all_ps_btn.setProperty("accent", "success")
+        run_all_ps_btn.clicked.connect(self._execute_powershell_all)
         clear_ps_btn = QPushButton("Очистить вывод")
         clear_ps_btn.clicked.connect(lambda: self.ps_output.clear())
         ps_btns.addWidget(run_ps_btn)
+        ps_btns.addWidget(run_all_ps_btn)
         ps_btns.addWidget(clear_ps_btn)
         ps_btns.addStretch()
         ps_layout.addLayout(ps_btns)
@@ -531,6 +552,8 @@ class TeacherMainWindow(QMainWindow):
         self.btn_ping.setEnabled(has_sel)
         self.btn_lock_all.setEnabled(has_any)
         self.btn_unlock_all.setEnabled(has_any)
+        self.btn_demo.setEnabled(has_any or self.btn_demo.isChecked())
+        self.btn_files.setEnabled(has_any)
         self.btn_msg.setEnabled(has_any)
         self.btn_power.setEnabled(has_any)
 
@@ -545,10 +568,90 @@ class TeacherMainWindow(QMainWindow):
             if idx >= 0:
                 self.ps_target_combo.setCurrentIndex(idx)
 
+    def _refresh_saved_commands(self) -> None:
+        self.ps_preset_combo.blockSignals(True)
+        self.ps_preset_combo.clear()
+        self.ps_preset_combo.addItem("Выберите сохранённую команду...", "")
+        for item in self.config.saved_commands:
+            name = str(item.get("name", "")).strip()
+            script = str(item.get("script", "")).strip()
+            if name and script:
+                self.ps_preset_combo.addItem(name, script)
+        self.ps_preset_combo.blockSignals(False)
+
     def _apply_ps_preset(self, idx: int) -> None:
         cmd = self.ps_preset_combo.itemData(idx)
         if cmd:
             self.ps_input.setPlainText(cmd)
+
+    def _save_current_ps_command(self) -> None:
+        script = self.ps_input.toPlainText().strip()
+        if not script:
+            QMessageBox.warning(self, "Пустая команда", "Сначала введите PowerShell-команду в поле ниже.")
+            return
+        name, ok = QInputDialog.getText(
+            self,
+            "Сохранить команду",
+            "Название команды (будет сохранено навсегда):",
+        )
+        if not ok or not name.strip():
+            return
+        clean_name = name.strip()
+        # Update existing by same name or append new
+        updated = False
+        for item in self.config.saved_commands:
+            if str(item.get("name", "")).strip().lower() == clean_name.lower():
+                item["name"] = clean_name
+                item["script"] = script
+                updated = True
+                break
+        if not updated:
+            self.config.saved_commands.append({"name": clean_name, "script": script})
+        save_config(self.config_path, self.config)
+        self._refresh_saved_commands()
+        idx = self.ps_preset_combo.findText(clean_name)
+        if idx >= 0:
+            self.ps_preset_combo.setCurrentIndex(idx)
+        self.statusBar().showMessage(f"Команда «{clean_name}» сохранена", 4000)
+
+    def _delete_selected_ps_command(self) -> None:
+        idx = self.ps_preset_combo.currentIndex()
+        if idx <= 0:
+            return
+        name = self.ps_preset_combo.currentText()
+        reply = QMessageBox.question(
+            self,
+            "Удалить команду",
+            f"Удалить сохранённую команду «{name}»?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+        )
+        if reply != QMessageBox.StandardButton.Yes:
+            return
+        self.config.saved_commands = [
+            item for item in self.config.saved_commands if str(item.get("name", "")) != name
+        ]
+        save_config(self.config_path, self.config)
+        self._refresh_saved_commands()
+
+    def _toggle_demo_broadcast(self, checked: bool) -> None:
+        if checked:
+            self.btn_demo.setText("Остановить демонстрацию")
+            self.btn_demo.setProperty("accent", "danger")
+            self.statusBar().showMessage("Идёт демонстрация экрана учителя всем подключённым ученикам")
+            asyncio.create_task(self.server.start_demo_broadcast())
+        else:
+            self.btn_demo.setText("Демонстрация экрана")
+            self.btn_demo.setProperty("accent", "primary")
+            self.statusBar().showMessage("Демонстрация экрана остановлена", 4000)
+            asyncio.create_task(self.server.stop_demo_broadcast())
+        self.btn_demo.style().unpolish(self.btn_demo)
+        self.btn_demo.style().polish(self.btn_demo)
+
+    def _execute_powershell_all(self) -> None:
+        script = self.ps_input.toPlainText().strip()
+        if not script:
+            return
+        asyncio.create_task(self._run_ps_async("__ALL__", script))
 
     def _open_selected_remote(self) -> None:
         if self.selected_client_id:
@@ -575,6 +678,8 @@ class TeacherMainWindow(QMainWindow):
             asyncio.create_task(self.server.lock_screen(client_id))
         elif action == "unlock":
             asyncio.create_task(self.server.unlock_screen(client_id))
+        elif action == "send_file":
+            self._open_file_transfer(preselected_id=client_id)
         elif action == "message":
             self._send_message_dialog(target_id=client_id)
         elif action == "powershell":
@@ -630,6 +735,10 @@ class TeacherMainWindow(QMainWindow):
             f"Экран: {d.get('screen_width')}x{d.get('screen_height')}\n"
             f"Активное окно: {d.get('active_window') or '—'}",
         )
+
+    def _open_file_transfer(self, preselected_id: str | None = None) -> None:
+        dlg = FileTransferDialog(self.server, preselected_client_id=preselected_id or self.selected_client_id, parent=self)
+        dlg.exec()
 
     def _send_message_dialog(self, target_id: str | None = None) -> None:
         text, ok = QInputDialog.getMultiLineText(

@@ -12,6 +12,7 @@ from PySide6.QtWidgets import QApplication, QMenu, QMessageBox, QSystemTrayIcon
 from shared.config import StudentConfig, save_config
 from student_app.handlers.router import CommandRouter
 from student_app.network.client import StudentClient
+from student_app.ui.demo_overlay import DemoViewerOverlay
 from student_app.ui.dialogs import StudentPasswordPrompt, StudentSettingsDialog
 from student_app.ui.hotkey import Win32GlobalHotkey
 from student_app.ui.lock_overlay import ScreenLockOverlay
@@ -23,6 +24,8 @@ class StudentSignals(QObject):
     lock_screen = Signal(str)
     unlock_screen = Signal()
     show_message = Signal(str, str)
+    demo_control = Signal(bool, str, bool)
+    demo_frame = Signal(bytes)
     hotkey_triggered = Signal()
 
 
@@ -46,9 +49,12 @@ class StudentTrayAgent(QObject):
         self.signals.lock_screen.connect(self._on_lock_screen)
         self.signals.unlock_screen.connect(self._on_unlock_screen)
         self.signals.show_message.connect(self._on_show_message)
+        self.signals.demo_control.connect(self._on_demo_control)
+        self.signals.demo_frame.connect(self._on_demo_frame)
         self.signals.hotkey_triggered.connect(self._open_protected_settings)
 
         self.lock_overlay = ScreenLockOverlay(config.hotkey or "Ctrl+Alt+Shift+M")
+        self.demo_overlay = DemoViewerOverlay(config.hotkey or "Ctrl+Alt+Shift+M")
 
         self.router = CommandRouter(
             on_lock_screen=self.signals.lock_screen.emit,
@@ -60,6 +66,8 @@ class StudentTrayAgent(QObject):
             config_path=config_path,
             router=self.router,
             on_state_changed=self.signals.state_changed.emit,
+            on_demo_control=self.signals.demo_control.emit,
+            on_demo_frame=self.signals.demo_frame.emit,
         )
 
         # System Tray Icon (no taskbar window)
@@ -119,6 +127,16 @@ class StudentTrayAgent(QObject):
     def _on_unlock_screen(self) -> None:
         self.lock_overlay.unlock()
 
+    def _on_demo_control(self, active: bool, title: str, fullscreen: bool) -> None:
+        if active:
+            self.demo_overlay.set_hotkey_hint(self.config.hotkey or "Ctrl+Alt+Shift+M")
+            self.demo_overlay.start_demo(title=title, fullscreen=fullscreen)
+        else:
+            self.demo_overlay.stop_demo()
+
+    def _on_demo_frame(self, jpeg_bytes: bytes) -> None:
+        self.demo_overlay.update_frame(jpeg_bytes)
+
     def _on_show_message(self, title: str, text: str) -> None:
         box = QMessageBox()
         box.setWindowTitle(title)
@@ -151,10 +169,12 @@ class StudentTrayAgent(QObject):
                 if dlg.unlock_requested:
                     self.router.screen_locked = False
                     self.lock_overlay.unlock()
+                    self.demo_overlay.stop_demo()
                     return
                 save_config(self.config_path, self.config)
                 self.hotkey.register(self.config.hotkey or "Ctrl+Alt+Shift+M")
                 self.lock_overlay.set_hotkey_hint(self.config.hotkey or "Ctrl+Alt+Shift+M")
+                self.demo_overlay.set_hotkey_hint(self.config.hotkey or "Ctrl+Alt+Shift+M")
                 self.client.trigger_reconnect()
         finally:
             self._dialog_open = False
@@ -175,6 +195,7 @@ class StudentTrayAgent(QObject):
 
     async def _shutdown(self) -> None:
         self.lock_overlay.unlock()
+        self.demo_overlay.stop_demo()
         self.hotkey.unregister()
         await self.client.stop()
         self.tray.hide()

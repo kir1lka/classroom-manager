@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import os
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import TypeVar
 
@@ -38,6 +38,27 @@ class TeacherConfig:
     live_fps: float = 8.0
     thumb_width: int = 360
     live_width: int = 1280
+    demo_fps: float = 6.0
+    saved_commands: list[dict[str, str]] = field(
+        default_factory=lambda: [
+            {
+                "name": "Имя ПК, пользователь и IP",
+                "script": "hostname; whoami; (Get-NetIPAddress -AddressFamily IPv4 | Where-Object {$_.IPAddress -notlike '127.*'}).IPAddress",
+            },
+            {
+                "name": "Топ-10 процессов по памяти",
+                "script": "Get-Process | Sort-Object WS -Descending | Select-Object -First 10 Name, Id, @{N='MB';E={[math]::Round($_.WS/1MB,1)}} | Format-Table -AutoSize",
+            },
+            {
+                "name": "Закрыть браузеры (Chrome/Edge)",
+                "script": "Stop-Process -Name chrome,msedge -Force -ErrorAction SilentlyContinue; 'Готово'",
+            },
+            {
+                "name": "Открыть сайт в браузере",
+                "script": "Start-Process 'https://docs.python.org/3/'",
+            },
+        ]
+    )
 
 
 @dataclass

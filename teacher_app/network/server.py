@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import logging
 import socket
 import time
@@ -19,8 +20,10 @@ from shared.protocol import (
     ProtocolError,
     ScreenMode,
     decode_json,
+    pack_file_chunk,
     read_frame,
     send_json,
+    send_raw,
     unpack_screen_frame,
 )
 from shared.security import (
@@ -29,6 +32,7 @@ from shared.security import (
     generate_nonce,
     verify_session_hmac,
 )
+from student_app.handlers.screen_capture import capture_screen_jpeg
 from teacher_app.network.discovery import DiscoveryResponder
 
 logger = logging.getLogger("classroom_manager.teacher.server")
@@ -56,6 +60,7 @@ class StudentSession:
     screen_mode: ScreenMode = ScreenMode.OFF
     write_lock: asyncio.Lock = field(default_factory=asyncio.Lock)
     pending_requests: dict[str, asyncio.Future[dict[str, Any]]] = field(default_factory=dict)
+    pending_transfers: dict[str, asyncio.Future[dict[str, Any]]] = field(default_factory=dict)
 
     @property
     def label(self) -> str:
@@ -84,6 +89,10 @@ class TeacherServer:
         self._server: asyncio.AbstractServer | None = None
         self._discovery: DiscoveryResponder | None = None
         self._watchdog_task: asyncio.Task[None] | None = None
+        self._demo_task: asyncio.Task[None] | None = None
+        self._demo_active = False
+        self._demo_fullscreen = True
+        self._demo_title = "Демонстрация экрана учителя"
         self._client_tasks: set[asyncio.Task[None]] = set()
         self._running = False
 
@@ -95,6 +104,10 @@ class TeacherServer:
     @property
     def is_running(self) -> bool:
         return self._running
+
+    @property
+    def is_demo_active(self) -> bool:
+        return self._demo_active
 
     @property
     def bound_port(self) -> int:
@@ -145,6 +158,7 @@ class TeacherServer:
         self._watchdog_task = asyncio.create_task(self._heartbeat_watchdog())
 
     async def stop(self) -> None:
+        await self.stop_demo_broadcast()
         self._running = False
         if self._watchdog_task:
             self._watchdog_task.cancel()
@@ -269,6 +283,19 @@ class TeacherServer:
                     quality=50,
                 )
 
+            # If Teacher screen demonstration is currently running, include latecomer automatically
+            if self._demo_active:
+                async with session.write_lock:
+                    await send_json(
+                        writer,
+                        MessageType.DEMO_CONTROL,
+                        {
+                            "active": True,
+                            "fullscreen": self._demo_fullscreen,
+                            "title": self._demo_title,
+                        },
+                    )
+
             # 2. Main receive loop
             while self._running:
                 msg_type, payload = await read_frame(reader)
@@ -296,6 +323,13 @@ class TeacherServer:
                     session.screen_height = height
                     if self.on_screen_frame:
                         self.on_screen_frame(session.client_id, width, height, mode, jpeg_bytes)
+
+                elif msg_type == MessageType.FILE_RESULT:
+                    res = decode_json(payload)
+                    tid = str(res.get("transfer_id", ""))
+                    fut = session.pending_transfers.pop(tid, None)
+                    if fut and not fut.done():
+                        fut.set_result(res)
 
         except (asyncio.IncompleteReadError, ConnectionError, OSError):
             pass
@@ -329,6 +363,11 @@ class TeacherServer:
             if not fut.done():
                 fut.set_result({"ok": False, "error": "Ученик отключился"})
         session.pending_requests.clear()
+
+        for fut in session.pending_transfers.values():
+            if not fut.done():
+                fut.set_result({"ok": False, "error": "Ученик отключился во время передачи"})
+        session.pending_transfers.clear()
 
         session.writer.close()
         with contextlib.suppress(Exception):
@@ -481,3 +520,185 @@ class TeacherServer:
                 await send_json(session.writer, MessageType.REMOTE_INPUT, event_payload)
         except Exception as exc:
             logger.debug("Failed to send REMOTE_INPUT to %s: %s", client_id, exc)
+
+    async def send_file(
+        self,
+        client_id: str,
+        local_path: Path,
+        dest_dir: str = "@desktop",
+        overwrite: bool = True,
+        open_after: bool = False,
+        on_progress: Callable[[int, int], None] | None = None,
+        timeout: float = 120.0,
+    ) -> dict[str, Any]:
+        """Stream a local file to a single student in 256 KiB chunks with SHA-256 verification."""
+        session = self.clients.get(client_id)
+        if session is None:
+            return {"ok": False, "error": "Ученик не в сети"}
+        if not local_path.is_file():
+            return {"ok": False, "error": f"Файл не найден: {local_path}"}
+
+        file_size = local_path.stat().st_size
+
+        def _compute_sha256() -> str:
+            h = hashlib.sha256()
+            with local_path.open("rb") as f:
+                while True:
+                    block = f.read(1024 * 1024)
+                    if not block:
+                        break
+                    h.update(block)
+            return h.hexdigest()
+
+        sha256_hex = await asyncio.to_thread(_compute_sha256)
+        transfer_id = uuid.uuid4().hex
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+        session.pending_transfers[transfer_id] = fut
+
+        logger.info(
+            "Audit: sending file '%s' (%d bytes) to %s -> %s",
+            local_path.name,
+            file_size,
+            session.label,
+            dest_dir,
+        )
+
+        chunk_size = 256 * 1024
+        sent = 0
+        try:
+            async with session.write_lock:
+                await send_json(
+                    session.writer,
+                    MessageType.FILE_START,
+                    {
+                        "transfer_id": transfer_id,
+                        "filename": local_path.name,
+                        "size": file_size,
+                        "dest_dir": dest_dir,
+                        "overwrite": overwrite,
+                        "open_after": open_after,
+                        "sha256": sha256_hex,
+                    },
+                )
+
+            with local_path.open("rb") as f:
+                while True:
+                    if fut.done():
+                        break
+                    chunk = await asyncio.to_thread(f.read, chunk_size)
+                    if not chunk:
+                        break
+                    packed = pack_file_chunk(transfer_id, chunk)
+                    async with session.write_lock:
+                        await send_raw(session.writer, MessageType.FILE_CHUNK, packed)
+                    sent += len(chunk)
+                    if on_progress:
+                        on_progress(sent, file_size)
+
+            if not fut.done():
+                async with session.write_lock:
+                    await send_json(session.writer, MessageType.FILE_END, {"transfer_id": transfer_id})
+
+            return await asyncio.wait_for(fut, timeout=timeout)
+        except asyncio.TimeoutError:
+            session.pending_transfers.pop(transfer_id, None)
+            return {"ok": False, "error": f"Таймаут передачи файла ({timeout:.0f} с)"}
+        except Exception as exc:
+            session.pending_transfers.pop(transfer_id, None)
+            return {"ok": False, "error": str(exc)}
+
+    async def broadcast_file(
+        self,
+        local_path: Path,
+        dest_dir: str = "@desktop",
+        overwrite: bool = True,
+        open_after: bool = False,
+        client_ids: list[str] | None = None,
+    ) -> dict[str, dict[str, Any]]:
+        """Send a file in parallel to multiple (or all) connected students."""
+        targets = client_ids if client_ids is not None else list(self.clients.keys())
+        if not targets:
+            return {}
+        results = await asyncio.gather(
+            *(
+                self.send_file(
+                    cid,
+                    local_path,
+                    dest_dir=dest_dir,
+                    overwrite=overwrite,
+                    open_after=open_after,
+                )
+                for cid in targets
+            )
+        )
+        return dict(zip(targets, results))
+
+    async def _send_demo_control_all(self, active: bool) -> None:
+        payload = {
+            "active": active,
+            "fullscreen": self._demo_fullscreen,
+            "title": self._demo_title,
+        }
+        for session in list(self.clients.values()):
+            try:
+                async with session.write_lock:
+                    await send_json(session.writer, MessageType.DEMO_CONTROL, payload)
+            except Exception:
+                pass
+
+    async def start_demo_broadcast(
+        self,
+        fps: float | None = None,
+        width: int = 1280,
+        quality: int = 68,
+        fullscreen: bool = True,
+        title: str | None = None,
+    ) -> None:
+        """Broadcast the Teacher's own screen live to all connected students."""
+        if self._demo_active:
+            return
+        self._demo_active = True
+        self._demo_fullscreen = fullscreen
+        self._demo_title = title or f"Демонстрация экрана учителя ({self.config.classroom_id})"
+        rate = max(1.0, min(15.0, float(fps if fps is not None else self.config.demo_fps)))
+
+        logger.info("Audit: started Teacher screen demo broadcast (%.1f FPS, %dpx)", rate, width)
+        await self._send_demo_control_all(True)
+        self._demo_task = asyncio.create_task(self._demo_broadcast_loop(rate, width, quality))
+
+    async def stop_demo_broadcast(self) -> None:
+        """Stop Teacher screen demonstration on all connected students."""
+        if not self._demo_active and self._demo_task is None:
+            return
+        self._demo_active = False
+        if self._demo_task is not None:
+            self._demo_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self._demo_task
+            self._demo_task = None
+        await self._send_demo_control_all(False)
+        logger.info("Audit: stopped Teacher screen demo broadcast")
+
+    async def _demo_broadcast_loop(self, fps: float, width: int, quality: int) -> None:
+        interval = 1.0 / fps
+        while self._running and self._demo_active:
+            t0 = time.monotonic()
+            sessions = list(self.clients.values())
+            if sessions:
+                try:
+                    _w, _h, jpeg_bytes = await asyncio.to_thread(capture_screen_jpeg, width, quality)
+
+                    async def _push(sess: StudentSession) -> None:
+                        try:
+                            async with sess.write_lock:
+                                await send_raw(sess.writer, MessageType.DEMO_FRAME, jpeg_bytes)
+                        except Exception:
+                            pass
+
+                    await asyncio.gather(*(_push(s) for s in sessions))
+                except Exception as exc:
+                    logger.debug("Demo screen capture error: %s", exc)
+
+            elapsed = time.monotonic() - t0
+            await asyncio.sleep(max(0.03, interval - elapsed))

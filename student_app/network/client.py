@@ -23,12 +23,14 @@ from shared.protocol import (
     read_frame,
     send_json,
     send_raw,
+    unpack_file_chunk,
 )
 from shared.security import (
     compute_session_hmac,
     create_client_ssl_context,
     get_peer_cert_fingerprint,
 )
+from student_app.handlers.file_transfer import FileTransferReceiver
 from student_app.handlers.remote_input import handle_remote_input
 from student_app.handlers.router import CommandRouter
 from student_app.handlers.screen_capture import capture_screen_jpeg
@@ -47,11 +49,15 @@ class StudentClient:
         config_path: Path,
         router: CommandRouter,
         on_state_changed: Callable[[str, str], None] | None = None,
+        on_demo_control: Callable[[bool, str, bool], None] | None = None,
+        on_demo_frame: Callable[[bytes], None] | None = None,
     ) -> None:
         self.config = config
         self.config_path = config_path
         self.router = router
         self.on_state_changed = on_state_changed
+        self.on_demo_control = on_demo_control
+        self.on_demo_frame = on_demo_frame
 
         self.client_id = self._load_or_create_client_id(config_path.parent / "client_id.txt")
         self._running = False
@@ -236,6 +242,7 @@ class StudentClient:
 
             hb_task = asyncio.create_task(self._heartbeat_loop(writer, write_lock))
             stream_task = asyncio.create_task(self._screen_stream_loop(writer, write_lock))
+            file_receiver = FileTransferReceiver()
             try:
                 while self._running:
                     mtype, data = await read_frame(reader)
@@ -254,7 +261,35 @@ class StudentClient:
                     elif mtype == MessageType.REMOTE_INPUT:
                         inp = decode_json(data)
                         await asyncio.to_thread(handle_remote_input, inp)
+                    elif mtype == MessageType.FILE_START:
+                        meta = decode_json(data)
+                        err = await asyncio.to_thread(file_receiver.start_transfer, meta)
+                        if err is not None:
+                            async with write_lock:
+                                await send_json(writer, MessageType.FILE_RESULT, err)
+                    elif mtype == MessageType.FILE_CHUNK:
+                        tid, chunk = unpack_file_chunk(data)
+                        await asyncio.to_thread(file_receiver.write_chunk, tid, chunk)
+                    elif mtype == MessageType.FILE_END:
+                        end_meta = decode_json(data)
+                        tid = str(end_meta.get("transfer_id", ""))
+                        res = await asyncio.to_thread(file_receiver.finish_transfer, tid)
+                        async with write_lock:
+                            await send_json(writer, MessageType.FILE_RESULT, res)
+                    elif mtype == MessageType.DEMO_CONTROL:
+                        ctrl = decode_json(data)
+                        active = bool(ctrl.get("active", False))
+                        title = str(ctrl.get("title") or "Демонстрация экрана учителя")
+                        fullscreen = bool(ctrl.get("fullscreen", True))
+                        if self.on_demo_control:
+                            self.on_demo_control(active, title, fullscreen)
+                    elif mtype == MessageType.DEMO_FRAME:
+                        if self.on_demo_frame:
+                            self.on_demo_frame(data)
             finally:
+                if self.on_demo_control:
+                    self.on_demo_control(False, "", True)
+                file_receiver.cleanup_all()
                 hb_task.cancel()
                 stream_task.cancel()
                 await asyncio.gather(hb_task, stream_task, return_exceptions=True)

@@ -168,7 +168,17 @@ async def test_end_to_end_tls_discovery_commands_and_stream(tmp_path: Path) -> N
             on_lock_screen=locked_messages.append,
             on_unlock_screen=_on_unlock,
         )
-        client = StudentClient(s_cfg, student_dir / "config.json", router)
+        demo_states: list[bool] = []
+        demo_frames: list[bytes] = []
+        demo_frame_evt = asyncio.Event()
+
+        client = StudentClient(
+            s_cfg,
+            student_dir / "config.json",
+            router,
+            on_demo_control=lambda active, _t, _fs: demo_states.append(active),
+            on_demo_frame=lambda jpg: (demo_frames.append(jpg), demo_frame_evt.set()),
+        )
         client.start()
 
         try:
@@ -207,6 +217,51 @@ async def test_end_to_end_tls_discovery_commands_and_stream(tmp_path: Path) -> N
             await asyncio.wait_for(frame_evt.wait(), timeout=5.0)
             assert len(received_frames) >= 1
             assert received_frames[0].startswith(b"\xff\xd8")  # valid JPEG magic header
+
+            # 6b. Verify chunked encrypted file transfer with custom destination & SHA-256 check
+            src_file = tmp_path / "Задание_Урок_1.bin"
+            sample_payload = (b"ClassroomManagerFileData2026-" * 25000)  # ~725 KB (>2 chunks)
+            src_file.write_bytes(sample_payload)
+            dest_folder = tmp_path / "student_received" / "Урок_1"
+
+            ft_res = await server.send_file(
+                cid,
+                src_file,
+                dest_dir=str(dest_folder),
+                overwrite=True,
+                open_after=False,
+            )
+            assert ft_res["ok"] is True
+            saved = Path(ft_res["saved_path"])
+            assert saved.exists()
+            assert saved.read_bytes() == sample_payload
+
+            # Non-overwrite mode should create a deduplicated copy "(1)"
+            ft_res2 = await server.send_file(
+                cid,
+                src_file,
+                dest_dir=str(dest_folder),
+                overwrite=False,
+                open_after=False,
+            )
+            assert ft_res2["ok"] is True
+            saved2 = Path(ft_res2["saved_path"])
+            assert saved2 != saved
+            assert "(1)" in saved2.name
+            assert saved2.read_bytes() == sample_payload
+
+            # 6c. Verify Teacher Screen Demonstration broadcast to student
+            await server.start_demo_broadcast(fps=5.0, width=320, quality=50)
+            await asyncio.wait_for(demo_frame_evt.wait(), timeout=5.0)
+            assert True in demo_states
+            assert len(demo_frames) >= 1
+            assert demo_frames[0].startswith(b"\xff\xd8")
+            await server.stop_demo_broadcast()
+            for _ in range(20):
+                if demo_states and demo_states[-1] is False:
+                    break
+                await asyncio.sleep(0.05)
+            assert demo_states[-1] is False
 
             # 7. Verify unauthenticated client with wrong secret is rejected
             bad_cfg = StudentConfig(
