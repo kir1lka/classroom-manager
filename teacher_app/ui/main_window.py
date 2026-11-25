@@ -639,13 +639,18 @@ class TeacherMainWindow(QMainWindow):
         self.btn_power.setProperty("accent", "danger")
         self.btn_power.setMenu(self._build_power_menu())
 
+        # Left group: selected PC + everyday safe actions
         ag.addWidget(self.btn_remote)
-        ag.addWidget(self.btn_lock)
-        ag.addWidget(self.btn_unlock)
         ag.addWidget(self.btn_msg)
         ag.addWidget(self.btn_ping)
-        ag.addWidget(self.btn_power)
+
+        # Visual separation between everyday actions and restriction/power controls
         ag.addStretch(1)
+
+        # Right group: screen lock & power controls
+        ag.addWidget(self.btn_lock)
+        ag.addWidget(self.btn_unlock)
+        ag.addWidget(self.btn_power)
 
         tb_outer.addWidget(self.grid_toolbar_widget)
         c_layout.addWidget(top_bar)
