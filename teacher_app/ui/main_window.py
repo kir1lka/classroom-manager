@@ -59,11 +59,11 @@ CARD_MAX_WIDTH = 540
 CARD_DEFAULT_WIDTH = 326
 
 GRID_SORT_MODES: list[tuple[str, str]] = [
-    ("natural_asc", "По порядку (1 → 10)"),
-    ("natural_desc", "Обратный (10 → 1)"),
-    ("custom", "Вручную (перетаскиванием)"),
+    ("natural_asc", "По порядку"),
+    ("natural_desc", "Обратный порядок"),
+    ("custom", "Вручную"),
     ("ip_asc", "По IP-адресу"),
-    ("locked_first", "Заблокированные сверху"),
+    ("locked_first", "Блок сверху"),
     ("connected_at", "По подключению"),
 ]
 
@@ -739,7 +739,7 @@ class TeacherMainWindow(QMainWindow):
 
         # Sort mode selector
         self.sort_combo = QComboBox()
-        self.sort_combo.setMinimumWidth(196)
+        self.sort_combo.setFixedSize(174, 38)
         self.sort_combo.setToolTip("Порядок отображения карточек ПК учеников")
         for key, label in GRID_SORT_MODES:
             self.sort_combo.addItem(label, key)
@@ -747,15 +747,27 @@ class TeacherMainWindow(QMainWindow):
         self.sort_combo.setCurrentIndex(cur_sort_idx if cur_sort_idx >= 0 else 0)
         self.sort_combo.currentIndexChanged.connect(self._on_sort_mode_changed)
 
-        # Card size controls (- [slider] + width)
-        size_pod = GlassFrame(variant="inset", radius=12)
+        # Card size controls (clean pill matching combo & search height)
+        size_pod = GlassFrame(variant="inset", radius=14)
+        size_pod.setFixedSize(226, 38)
         sp_row = QHBoxLayout(size_pod)
-        sp_row.setContentsMargins(8, 3, 8, 3)
-        sp_row.setSpacing(6)
+        sp_row.setContentsMargins(10, 0, 10, 0)
+        sp_row.setSpacing(8)
 
-        self.btn_size_down = QPushButton("−")
+        round_btn_qss = (
+            "QPushButton {"
+            "  min-width: 24px; max-width: 24px;"
+            "  min-height: 24px; max-height: 24px;"
+            "  padding: 0px 0px 2px 0px; margin: 0px;"
+            "  border-radius: 12px;"
+            "  font-size: 14px; font-weight: 700;"
+            "}"
+        )
+
+        self.btn_size_down = QPushButton("-")
         self.btn_size_down.setObjectName("IconPill")
         self.btn_size_down.setFixedSize(24, 24)
+        self.btn_size_down.setStyleSheet(round_btn_qss)
         self.btn_size_down.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_size_down.setToolTip("Уменьшить карточки")
         self.btn_size_down.clicked.connect(lambda: self._step_card_size(-36))
@@ -764,7 +776,25 @@ class TeacherMainWindow(QMainWindow):
         self.card_size_slider.setRange(CARD_MIN_WIDTH, CARD_MAX_WIDTH)
         self.card_size_slider.setSingleStep(16)
         self.card_size_slider.setPageStep(36)
-        self.card_size_slider.setFixedWidth(92)
+        self.card_size_slider.setFixedSize(96, 24)
+        self.card_size_slider.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.card_size_slider.setStyleSheet(
+            "QSlider { background: transparent; }"
+            "QSlider::groove:horizontal {"
+            "  height: 4px; border-radius: 2px;"
+            "  background: rgba(148, 163, 184, 0.35);"
+            "}"
+            "QSlider::sub-page:horizontal {"
+            "  height: 4px; border-radius: 2px;"
+            "  background: #0A84FF;"
+            "}"
+            "QSlider::handle:horizontal {"
+            "  width: 14px; height: 14px; margin: -5px 0;"
+            "  border-radius: 7px;"
+            "  background: #FFFFFF;"
+            "  border: 2px solid #0A84FF;"
+            "}"
+        )
         self.card_size_slider.setToolTip("Размер карточек экранов учеников")
         init_w = max(CARD_MIN_WIDTH, min(CARD_MAX_WIDTH, int(self.config.grid_card_width or CARD_DEFAULT_WIDTH)))
         self.card_size_slider.setValue(init_w)
@@ -773,25 +803,26 @@ class TeacherMainWindow(QMainWindow):
         self.btn_size_up = QPushButton("+")
         self.btn_size_up.setObjectName("IconPill")
         self.btn_size_up.setFixedSize(24, 24)
+        self.btn_size_up.setStyleSheet(round_btn_qss)
         self.btn_size_up.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_size_up.setToolTip("Увеличить карточки")
         self.btn_size_up.clicked.connect(lambda: self._step_card_size(36))
 
         self.card_size_lbl = QLabel(self._format_size_tag(init_w))
-        self.card_size_lbl.setObjectName("MutedLabel")
-        self.card_size_lbl.setFixedWidth(34)
+        self.card_size_lbl.setObjectName("MonBadge")
+        self.card_size_lbl.setFixedSize(30, 22)
         self.card_size_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
 
-        sp_row.addWidget(self.btn_size_down)
-        sp_row.addWidget(self.card_size_slider)
-        sp_row.addWidget(self.btn_size_up)
-        sp_row.addWidget(self.card_size_lbl)
+        sp_row.addWidget(self.btn_size_down, alignment=Qt.AlignmentFlag.AlignVCenter)
+        sp_row.addWidget(self.card_size_slider, alignment=Qt.AlignmentFlag.AlignVCenter)
+        sp_row.addWidget(self.btn_size_up, alignment=Qt.AlignmentFlag.AlignVCenter)
+        sp_row.addWidget(self.card_size_lbl, alignment=Qt.AlignmentFlag.AlignVCenter)
 
         self.search_input = QLineEdit()
         self.search_input.setObjectName("SearchPill")
         self.search_input.setPlaceholderText("Поиск ПК, имени или IP...")
         self.search_input.setClearButtonEnabled(True)
-        self.search_input.setFixedWidth(220)
+        self.search_input.setFixedSize(220, 38)
         self._search_icon_action = self.search_input.addAction(
             make_icon("search", size=15),
             QLineEdit.ActionPosition.LeadingPosition,
