@@ -1,8 +1,12 @@
-"""Fullscreen pure-black ban overlay with frosted crimson glass ring and razor-sharp red cross."""
+"""Fullscreen pure-black ban overlay with frosted crimson glass ring and razor-sharp red cross.
+
+Creates one dedicated frameless always-on-top overlay per physical monitor so mixed resolutions
+and mixed DPI scales (e.g. 4K 150% + 1080p 100%) each display a perfectly centered ban screen.
+"""
 
 from __future__ import annotations
 
-from PySide6.QtCore import QPointF, QRectF, Qt
+from PySide6.QtCore import QPointF, QRectF, Qt, QTimer
 from PySide6.QtGui import (
     QColor,
     QGuiApplication,
@@ -11,10 +15,20 @@ from PySide6.QtGui import (
     QPainterPath,
     QPen,
     QRadialGradient,
+    QScreen,
 )
 from PySide6.QtWidgets import QLabel, QVBoxLayout, QWidget
 
 from teacher_app.ui.theme import make_app_icon
+
+
+def _normalize_ban_message(message: str) -> str:
+    clean = (message or "").strip()
+    if clean.startswith("(") and clean.endswith(")") and len(clean) > 2:
+        clean = clean[1:-1].strip()
+    if not clean or "Внимание на учителя" in clean:
+        clean = "срок бана: 1000 лет"
+    return clean
 
 
 class _RedCrossWidget(QWidget):
@@ -93,12 +107,12 @@ class _RedCrossWidget(QWidget):
         painter.end()
 
 
-class ScreenLockOverlay(QWidget):
-    """Covers the entire virtual desktop with pure black, crimson glass cross, and ban notice."""
+class _SingleMonitorBanWindow(QWidget):
+    """Pure-black ban window covering a single physical QScreen with centered content."""
 
-    def __init__(self, hotkey_hint: str = "Ctrl+Alt+Shift+M") -> None:
+    def __init__(self, parent=None) -> None:
         super().__init__(
-            None,
+            parent,
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
             | Qt.WindowType.Tool,
@@ -111,6 +125,7 @@ class ScreenLockOverlay(QWidget):
         self.setStyleSheet("QWidget#ScreenLockRoot { background-color: #000000; }")
 
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(32, 32, 32, 32)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
         layout.setSpacing(18)
 
@@ -131,7 +146,7 @@ class ScreenLockOverlay(QWidget):
 
         self.msg_lbl = QLabel("срок бана: 1000 лет")
         self.msg_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.msg_lbl.setWordWrap(False)
+        self.msg_lbl.setWordWrap(True)
         self.msg_lbl.setMaximumWidth(900)
         self.msg_lbl.setStyleSheet(
             'font-family: "Segoe UI Variable Text", "Segoe UI", sans-serif;'
@@ -150,30 +165,43 @@ class ScreenLockOverlay(QWidget):
         painter.fillRect(self.rect(), QColor("#000000"))
         painter.end()
 
-    def set_hotkey_hint(self, _hotkey: str) -> None:
-        # Intentionally hidden on the lock screen so students cannot see the admin hotkey
-        pass
-
-    def lock(self, message: str = "срок бана: 1000 лет") -> None:
+    def show_on_screen(self, screen: QScreen | None, message: str) -> None:
         self._locked = True
-        clean = (message or "").strip()
-        if clean.startswith("(") and clean.endswith(")") and len(clean) > 2:
-            clean = clean[1:-1].strip()
-        if not clean or "Внимание на учителя" in clean:
-            clean = "срок бана: 1000 лет"
-        self.msg_lbl.setText(clean)
+        self.msg_lbl.setText(message)
 
-        screens = QGuiApplication.screens()
-        if screens:
-            geom = screens[0].geometry()
-            for scr in screens[1:]:
-                geom = geom.united(scr.geometry())
-            self.setGeometry(geom)
-        self.showFullScreen()
+        if screen is None:
+            self.showFullScreen()
+            self.raise_()
+            return
+
+        geom = screen.geometry()
+        # Bind the native window handle to the exact target QScreen before showing
+        self.createWinId()
+        handle = self.windowHandle()
+        if handle is not None:
+            handle.setScreen(screen)
+
+        self.setGeometry(geom)
+        self.show()
+        # Re-apply exact monitor geometry after Windows processes any per-monitor DPI change
+        self.setGeometry(geom)
         self.raise_()
-        self.activateWindow()
+        QTimer.singleShot(
+            60,
+            lambda s=screen: self._enforce_screen_geometry(s),
+        )
 
-    def unlock(self) -> None:
+    def _enforce_screen_geometry(self, screen: QScreen) -> None:
+        if not self._locked:
+            return
+        try:
+            geom = screen.geometry()
+        except RuntimeError:
+            return
+        self.setGeometry(geom)
+        self.raise_()
+
+    def hide_overlay(self) -> None:
         self._locked = False
         self.hide()
 
@@ -188,3 +216,47 @@ class ScreenLockOverlay(QWidget):
             event.accept()
             return
         super().keyPressEvent(event)
+
+
+class ScreenLockOverlay(_SingleMonitorBanWindow):
+    """Multi-monitor ban controller: covers primary screen itself and spawns one window per extra screen."""
+
+    def __init__(self, hotkey_hint: str = "Ctrl+Alt+Shift+M") -> None:
+        super().__init__(None)
+        self._extra_overlays: list[_SingleMonitorBanWindow] = []
+
+    def set_hotkey_hint(self, _hotkey: str) -> None:
+        # Intentionally hidden on the lock screen so students cannot see the admin hotkey
+        pass
+
+    def _clear_extra_overlays(self) -> None:
+        for overlay in self._extra_overlays:
+            overlay.hide_overlay()
+            overlay.deleteLater()
+        self._extra_overlays.clear()
+
+    def lock(self, message: str = "срок бана: 1000 лет") -> None:
+        clean = _normalize_ban_message(message)
+        self._clear_extra_overlays()
+
+        screens = QGuiApplication.screens()
+        if not screens:
+            self.show_on_screen(None, clean)
+            self.activateWindow()
+            return
+
+        # Primary monitor handled by self
+        self.show_on_screen(screens[0], clean)
+
+        # Every secondary monitor gets its own dedicated centered ban window
+        for scr in screens[1:]:
+            extra = _SingleMonitorBanWindow(None)
+            extra.show_on_screen(scr, clean)
+            self._extra_overlays.append(extra)
+
+        self.raise_()
+        self.activateWindow()
+
+    def unlock(self) -> None:
+        self._clear_extra_overlays()
+        self.hide_overlay()
