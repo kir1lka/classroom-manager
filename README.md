@@ -1,17 +1,19 @@
-<img src="assets/teacher_icon.png" width="84" align="left" />
+<div align="center">
+  <img src="assets/teacher_icon.png" width="92" alt="Classroom Manager" />
 
-# Classroom Manager 2.2
+  <h1>Classroom Manager 2.2</h1>
 
-**Современная система управления компьютерным классом для Windows LAN в дизайне Liquid Glass – с поддержкой нескольких кабинетов, встроенным MCP-сервером для нейросетей и автопоиском без статических IP.**
+  <p><strong>Современная система управления компьютерным классом для Windows LAN в дизайне Liquid Glass – с поддержкой нескольких кабинетов, встроенным MCP-сервером для нейросетей и автопоиском без статических IP.</strong></p>
 
-[![Latest Release](https://img.shields.io/badge/Download-Latest%20Release%20(.exe)-0A84FF?logo=github)](https://github.com/kir1lka/classroom-manager/releases/latest)
-![Platform](https://img.shields.io/badge/OS-Windows%2010%2F11-0078D6?logo=windows&logoColor=white)
-![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)
-![UI](https://img.shields.io/badge/UI-PySide6%20Liquid%20Glass-41CD52?logo=qt&logoColor=white)
-![Security](https://img.shields.io/badge/Security-TLS%201.3%20%2B%20HMAC--SHA256-10B981)
-[![License](https://img.shields.io/badge/License-MIT-64748B)](LICENSE)
-
-<br clear="left" />
+  <p>
+    <a href="https://github.com/kir1lka/classroom-manager/releases/latest"><img src="https://img.shields.io/badge/Download-Latest%20Release%20(.exe)-0A84FF?logo=github" alt="Latest Release" /></a>
+    <img src="https://img.shields.io/badge/OS-Windows%2010%2F11-0078D6?logo=windows&logoColor=white" alt="Platform" />
+    <img src="https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white" alt="Python" />
+    <img src="https://img.shields.io/badge/UI-PySide6%20Liquid%20Glass-41CD52?logo=qt&logoColor=white" alt="UI" />
+    <img src="https://img.shields.io/badge/Security-TLS%201.3%20%2B%20HMAC--SHA256-10B981" alt="Security" />
+    <a href="LICENSE"><img src="https://img.shields.io/badge/License-MIT-64748B" alt="License" /></a>
+  </p>
+</div>
 
 **Classroom Manager 2.0 (Liquid Glass Edition)** — это быстрый, защищённый и полностью автономный комплекс из двух портативных Windows-приложений (**Консоль учителя** и **Агент ученика**) для школьных кабинетов информатики, университетских лабораторий и учебных центров. Живой мониторинг экранов, чёткое HD-управление 1:1, демонстрация экрана учителя, Drag & Drop раздача файлов, блокировка ПК и массовый запуск PowerShell работают сразу из коробки в обычной DHCP-сети.
 
