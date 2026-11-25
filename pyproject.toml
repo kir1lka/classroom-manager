@@ -1,6 +1,6 @@
 [project]
 name = "classroom-manager"
-version = "2.2.0"
+version = "2.2.1"
 description = "Modern Windows LAN Classroom Management Suite with iOS Liquid Glass UI (Teacher Console & Student Tray Agent)"
 requires-python = ">=3.11"
 

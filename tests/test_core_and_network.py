@@ -167,9 +167,17 @@ async def test_mcp_server_http_jsonrpc(tmp_path: Path) -> None:
         code, tools_res = await asyncio.to_thread(_post, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, headers)
         assert code == 200
         tool_names = {t["name"] for t in tools_res["result"]["tools"]}
-        assert {"list_classrooms", "list_students", "run_powershell", "run_powershell_all", "send_file"} <= tool_names
+        assert {
+            "list_classrooms",
+            "list_students",
+            "run_powershell",
+            "run_powershell_all",
+            "send_file",
+            "write_remote_file",
+            "browse_local_files",
+        } <= tool_names
 
-        # 3. Call list_classrooms tool
+        # 3. Call list_classrooms & browse_local_files tools
         code, call_res = await asyncio.to_thread(
             _post,
             {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "list_classrooms", "arguments": {}}},
@@ -180,6 +188,22 @@ async def test_mcp_server_http_jsonrpc(tmp_path: Path) -> None:
         parsed = json.loads(call_res["result"]["content"][0]["text"])
         assert parsed["active_classroom"] == "Cab-101"
         assert len(parsed["classrooms"]) == 2
+
+        sample_file = tmp_path / "lesson_demo.py"
+        sample_file.write_text("print('hi')", encoding="utf-8")
+        code, browse_res = await asyncio.to_thread(
+            _post,
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "method": "tools/call",
+                "params": {"name": "browse_local_files", "arguments": {"directory": str(tmp_path), "pattern": "*.py"}},
+            },
+            headers,
+        )
+        assert code == 200
+        browsed = json.loads(browse_res["result"]["content"][0]["text"])
+        assert any(e["name"] == "lesson_demo.py" for e in browsed["entries"])
     finally:
         await mcp.stop()
 

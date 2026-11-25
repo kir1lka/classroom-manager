@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
+import os
 import secrets
+import tempfile
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable
 
@@ -157,14 +160,14 @@ MCP_TOOLS: list[dict[str, Any]] = [
     },
     {
         "name": "send_file",
-        "description": "Передать локальный файл с компьютера учителя на один ПК ученика или весь класс с проверкой SHA-256.",
+        "description": "Передать локальный файл с компьютера учителя на один ПК ученика или весь класс в выбранную папку (с проверкой SHA-256 и автосозданием пути).",
         "inputSchema": {
             "type": "object",
             "properties": {
                 "file_path": {"type": "string", "description": "Абсолютный путь к файлу на ПК учителя."},
                 "dest_dir": {
                     "type": "string",
-                    "description": "Папка назначения (@desktop, @downloads, @documents, @public_desktop или путь на ПК ученика).",
+                    "description": "Папка назначения на ПК ученика (@desktop, @downloads, @documents, @public_desktop или любой путь, например C:\\Lessons\\Lab1).",
                     "default": "@desktop",
                 },
                 "target": {"type": "string", "description": "Необязательно: конкретный ПК ученика (если не указан – всем)."},
@@ -173,6 +176,49 @@ MCP_TOOLS: list[dict[str, Any]] = [
                 "open_after": {"type": "boolean", "default": False},
             },
             "required": ["file_path"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "write_remote_file",
+        "description": "Создать файл прямо из текста (или base64) и отправить его на один ПК ученика или весь класс в любую выбранную папку (идеально для раздачи кода, конфигов, заданий и скриптов).",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "filename": {"type": "string", "description": "Имя файла (например, task1.py, config.json, readme.txt)."},
+                "content": {"type": "string", "description": "Содержимое файла (UTF-8 текст или base64 при is_base64=true)."},
+                "is_base64": {"type": "boolean", "description": "true, если content передан в base64 (для бинарных файлов).", "default": False},
+                "dest_dir": {
+                    "type": "string",
+                    "description": "Папка назначения на ПК ученика (@desktop, @downloads, @documents, @public_desktop или любой путь, например C:\\Class\\Lab1).",
+                    "default": "@desktop",
+                },
+                "target": {"type": "string", "description": "Необязательно: конкретный ПК ученика (если не указан – всем)."},
+                "classroom_id": {"type": "string", "description": "Необязательно: фильтр по кабинету."},
+                "overwrite": {"type": "boolean", "default": True},
+                "open_after": {"type": "boolean", "default": False},
+            },
+            "required": ["filename", "content"],
+            "additionalProperties": False,
+        },
+    },
+    {
+        "name": "browse_local_files",
+        "description": "Показать список файлов и папок на ПК учителя в указанной директории (@desktop, @downloads, @documents или любой путь), чтобы выбрать файлы для отправки ученикам.",
+        "inputSchema": {
+            "type": "object",
+            "properties": {
+                "directory": {
+                    "type": "string",
+                    "description": "Папка на ПК учителя (@desktop, @downloads, @documents или абсолютный путь).",
+                    "default": "@desktop",
+                },
+                "pattern": {
+                    "type": "string",
+                    "description": "Необязательный фильтр по имени (например, *.pdf или *.py).",
+                    "default": "*",
+                },
+            },
             "additionalProperties": False,
         },
     },
@@ -567,6 +613,60 @@ class ClassroomMCPServer:
                 open_after=open_after,
                 client_ids=cids,
             )
-            return {"count": len(cids), "results": results}
+            return {"count": len(cids), "dest_dir": dest_dir, "results": results}
+
+        if name == "write_remote_file":
+            raw_name = Path(str(args.get("filename") or "").strip()).name
+            if not raw_name or raw_name in (".", ".."):
+                raise ValueError("Укажите корректное имя файла (filename)")
+            content = str(args.get("content") or "")
+            is_b64 = bool(args.get("is_base64", False))
+            raw_bytes = base64.b64decode(content) if is_b64 else content.encode("utf-8")
+            dest_dir = str(args.get("dest_dir") or "@desktop")
+            overwrite = bool(args.get("overwrite", True))
+            open_after = bool(args.get("open_after", False))
+            target = str(args.get("target") or "").strip()
+            cids = [self._resolve_client_id(target)] if target else self._filter_client_ids(args.get("classroom_id"))
+            if not cids:
+                return {"count": 0, "results": {}, "message": "Нет подключённых ПК учеников"}
+            self._emit_activity(f"AI -> Создать и отправить [{raw_name}] ({len(raw_bytes)} байт) на {len(cids)} ПК -> {dest_dir}")
+            with tempfile.TemporaryDirectory(prefix="cm_mcp_") as tmp_dir:
+                tmp_path = Path(tmp_dir) / raw_name
+                tmp_path.write_bytes(raw_bytes)
+                results = await srv.broadcast_file(
+                    tmp_path,
+                    dest_dir=dest_dir,
+                    overwrite=overwrite,
+                    open_after=open_after,
+                    client_ids=cids,
+                )
+            return {"count": len(cids), "filename": raw_name, "dest_dir": dest_dir, "results": results}
+
+        if name == "browse_local_files":
+            spec = str(args.get("directory") or "@desktop").strip()
+            pattern = str(args.get("pattern") or "*").strip() or "*"
+            home = Path.home()
+            presets = {
+                "@desktop": home / "Desktop",
+                "@downloads": home / "Downloads",
+                "@documents": home / "Documents",
+            }
+            folder = presets.get(spec.lower(), Path(os.path.expandvars(spec)))
+            if not folder.exists() or not folder.is_dir():
+                raise ValueError(f"Папка не найдена: {folder}")
+            entries = []
+            for item in sorted(folder.glob(pattern), key=lambda p: (not p.is_dir(), p.name.lower()))[:100]:
+                try:
+                    entries.append(
+                        {
+                            "name": item.name,
+                            "path": str(item.resolve()),
+                            "is_dir": item.is_dir(),
+                            "size_bytes": 0 if item.is_dir() else item.stat().st_size,
+                        }
+                    )
+                except OSError:
+                    continue
+            return {"directory": str(folder.resolve()), "count": len(entries), "entries": entries}
 
         raise ValueError(f"Неизвестный инструмент MCP: {name}")
