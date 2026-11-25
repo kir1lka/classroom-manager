@@ -198,6 +198,11 @@ classroom-manager/
 
 ---
 
+## Авторы и контрибьюторы
+
+- **Kirill Blinov** ([@kir1lka](https://github.com/kir1lka)) – автор проекта и архитектура
+- **Google AI Neon (Antigravity)** – соавтор редизайна Liquid Glass UI, иконок и встроенного MCP-сервера
+
 ## Лицензия
 
-Проект распространяется под открытой лицензией **[MIT](LICENSE)**.
+Проект распространяется под открытой лицензией **[MIT](LICENSE)** (`Copyright (c) 2026 Kirill Blinov & Google AI Neon`).
