@@ -290,7 +290,7 @@ class TeacherLoginDialog(LiquidDialog):
         # Classroom pill badge
         badge_row = QHBoxLayout()
         badge_row.addStretch()
-        room_badge = QLabel(f"Кабинет • {classroom_id}")
+        room_badge = QLabel(f"Кабинет {classroom_id}")
         room_badge.setObjectName("AccentBadge")
         room_badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
         badge_row.addWidget(room_badge)

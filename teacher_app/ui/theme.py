@@ -780,7 +780,7 @@ QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal {{
 }}
 QSplitter::handle {{
     background: transparent;
-    width: 10px;
+    width: 16px;
 }}
 QMenu {{
     background-color: {t.menu_bg};
@@ -1177,13 +1177,24 @@ def make_icon(name: str, color: str | None = None, size: int = 18) -> QIcon:
         p.drawPath(path)
 
     elif name == "settings":
-        p.drawEllipse(QRectF(s * 0.34, s * 0.34, s * 0.32, s * 0.32))
-        for deg in range(0, 360, 60):
-            rad = math.radians(deg)
-            p.drawLine(
-                QPointF(s * 0.5 + math.cos(rad) * s * 0.24, s * 0.5 + math.sin(rad) * s * 0.24),
-                QPointF(s * 0.5 + math.cos(rad) * s * 0.38, s * 0.5 + math.sin(rad) * s * 0.38),
-            )
+        # Classic 8-tooth mechanical gear outline + center hole
+        cx, cy = s * 0.5, s * 0.5
+        r_outer = s * 0.39
+        r_inner = s * 0.28
+        teeth = 8
+        gear = QPainterPath()
+        pts: list[QPointF] = []
+        for i in range(teeth):
+            base_deg = i * (360.0 / teeth)
+            for offset, rad_r in ((-14.0, r_inner), (-8.5, r_outer), (8.5, r_outer), (14.0, r_inner)):
+                a = math.radians(base_deg + offset)
+                pts.append(QPointF(cx + math.cos(a) * rad_r, cy + math.sin(a) * rad_r))
+        gear.moveTo(pts[0])
+        for pt in pts[1:]:
+            gear.lineTo(pt)
+        gear.closeSubpath()
+        p.drawPath(gear)
+        p.drawEllipse(QRectF(cx - s * 0.13, cy - s * 0.13, s * 0.26, s * 0.26))
 
     elif name == "key":
         p.drawEllipse(QRectF(s * 0.16, s * 0.32, s * 0.34, s * 0.34))

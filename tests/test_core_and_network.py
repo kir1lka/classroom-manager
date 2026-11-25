@@ -34,6 +34,7 @@ from student_app.handlers.screen_capture import capture_screen_jpeg, list_monito
 from student_app.network.client import StudentClient
 from student_app.network.discovery import discover_teacher_udp
 from student_app.ui.hotkey import parse_hotkey_string
+from teacher_app.network.mcp_server import ClassroomMCPServer, build_mcp_client_config
 from teacher_app.network.server import TeacherServer
 from teacher_app.ui.theme import get_stylesheet
 
@@ -113,6 +114,74 @@ def test_multi_classroom_config_management() -> None:
     assert cfg.classroom_id == "Cab-101"
     # Cannot remove the last remaining classroom
     assert cfg.remove_classroom("Cab-101") is False
+
+
+@pytest.mark.asyncio
+async def test_mcp_server_http_jsonrpc(tmp_path: Path) -> None:
+    import json
+    import urllib.error
+    import urllib.request
+
+    cfg = TeacherConfig(
+        initialized=True,
+        classroom_id="Cab-101",
+        class_secret="MCP-TEST-KEY1",
+        classrooms=[
+            {"id": "Cab-101", "secret": "MCP-TEST-KEY1"},
+            {"id": "Cab-204", "secret": "MCP-TEST-KEY2"},
+        ],
+        tcp_port=0,
+        discovery_enabled=False,
+    )
+    server = TeacherServer(config=cfg, data_dir=tmp_path / "teacher")
+    mcp = ClassroomMCPServer(teacher_server=server, port=0, token="cm_test_secret_token")
+    await mcp.start()
+    try:
+        assert mcp.is_running is True
+        cfg_json = json.loads(build_mcp_client_config(mcp.bound_port, "cm_test_secret_token"))
+        url = cfg_json["mcpServers"]["classroom-manager"]["url"]
+        headers = cfg_json["mcpServers"]["classroom-manager"]["headers"]
+
+        def _post(body: dict, hdrs: dict[str, str]) -> tuple[int, dict]:
+            req = urllib.request.Request(
+                url,
+                data=json.dumps(body).encode("utf-8"),
+                headers={"Content-Type": "application/json", **hdrs},
+                method="POST",
+            )
+            try:
+                with urllib.request.urlopen(req, timeout=5) as resp:
+                    return resp.status, json.loads(resp.read().decode("utf-8"))
+            except urllib.error.HTTPError as err:
+                return err.code, json.loads(err.read().decode("utf-8"))
+
+        # 1. Unauthorized request must be rejected with 401
+        code, _ = await asyncio.to_thread(_post, {"jsonrpc": "2.0", "id": 1, "method": "tools/list"}, {})
+        assert code == 401
+
+        # 2. Initialize & tools/list succeed with Bearer token
+        code, init_res = await asyncio.to_thread(_post, {"jsonrpc": "2.0", "id": 1, "method": "initialize"}, headers)
+        assert code == 200
+        assert init_res["result"]["serverInfo"]["name"] == "classroom-manager"
+
+        code, tools_res = await asyncio.to_thread(_post, {"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, headers)
+        assert code == 200
+        tool_names = {t["name"] for t in tools_res["result"]["tools"]}
+        assert {"list_classrooms", "list_students", "run_powershell", "run_powershell_all", "send_file"} <= tool_names
+
+        # 3. Call list_classrooms tool
+        code, call_res = await asyncio.to_thread(
+            _post,
+            {"jsonrpc": "2.0", "id": 3, "method": "tools/call", "params": {"name": "list_classrooms", "arguments": {}}},
+            headers,
+        )
+        assert code == 200
+        assert call_res["result"]["isError"] is False
+        parsed = json.loads(call_res["result"]["content"][0]["text"])
+        assert parsed["active_classroom"] == "Cab-101"
+        assert len(parsed["classrooms"]) == 2
+    finally:
+        await mcp.stop()
 
 
 def test_multimonitor_hd_capture_and_themes() -> None:

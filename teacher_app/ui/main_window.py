@@ -34,6 +34,7 @@ from PySide6.QtWidgets import (
 from shared.config import TeacherConfig, save_config
 from student_app.handlers.screen_capture import list_monitors
 from teacher_app.network.discovery import get_local_ipv4_addresses
+from teacher_app.network.mcp_server import ClassroomMCPServer, build_mcp_client_config, generate_mcp_token
 from teacher_app.network.server import StudentSession, TeacherServer
 from teacher_app.ui.dialogs import AddClassroomDialog, TeacherSettingsDialog
 from teacher_app.ui.file_transfer_dialog import FileTransferDialog
@@ -89,6 +90,7 @@ class ServerSignals(QObject):
     client_updated = Signal(object)
     screen_frame = Signal(str, int, int, int, bytes)
     log_line = Signal(str)
+    mcp_activity = Signal(str)
 
 
 class StudentCardWidget(GlassFrame):
@@ -221,7 +223,7 @@ class StudentCardWidget(GlassFrame):
         self.title_lbl.setText((label_text[:20] + "…") if len(label_text) > 21 else label_text)
         self.title_lbl.setToolTip(f"{session.label} ({session.hostname})")
 
-        ping_str = f" • {session.last_ping_ms:.0f} мс" if session.last_ping_ms is not None else ""
+        ping_str = f", {session.last_ping_ms:.0f} мс" if session.last_ping_ms is not None else ""
         meta_raw = f"{session.username} @ {session.ip}{ping_str}"
         self.meta_lbl.setText((meta_raw[:33] + "…") if len(meta_raw) > 34 else meta_raw)
 
@@ -331,7 +333,7 @@ class TeacherMainWindow(QMainWindow):
         self.signals = signals
         self._room_filter: str = self.config.classroom_id
 
-        self.setWindowTitle(f"Classroom Manager — {config.classroom_id}")
+        self.setWindowTitle(f"Classroom Manager – {config.classroom_id}")
         self.setWindowIcon(make_app_icon("teacher"))
         self.resize(1420, 860)
         self.setMinimumSize(1120, 680)
@@ -344,6 +346,14 @@ class TeacherMainWindow(QMainWindow):
             on_client_disconnected=self.signals.client_disconnected.emit,
             on_client_updated=self.signals.client_updated.emit,
             on_screen_frame=lambda cid, w, h, m, data: self.signals.screen_frame.emit(cid, w, h, int(m), data),
+        )
+        if not self.config.mcp_token:
+            self.config.mcp_token = generate_mcp_token()
+        self.mcp_server = ClassroomMCPServer(
+            teacher_server=self.server,
+            port=self.config.mcp_port,
+            token=self.config.mcp_token,
+            on_activity=self.signals.mcp_activity.emit,
         )
 
         self.cards: dict[str, StudentCardWidget] = {}
@@ -585,16 +595,16 @@ class TeacherMainWindow(QMainWindow):
         tb_header.addWidget(self.search_input, alignment=Qt.AlignmentFlag.AlignVCenter)
         tb_outer.addLayout(tb_header)
 
-        # Contextual Workstation Action Bar (visible ONLY on Page 0)
+        # Contextual Workstation Action Bar (shown ONLY on Page 0 when students are connected)
         self.grid_toolbar_widget = GlassFrame(variant="inset", radius=14)
         ag = QHBoxLayout(self.grid_toolbar_widget)
-        ag.setContentsMargins(10, 6, 10, 6)
-        ag.setSpacing(6)
+        ag.setContentsMargins(12, 8, 12, 8)
+        ag.setSpacing(8)
 
-        self.selected_badge_lbl = QLabel("ПК не выбран")
+        self.selected_badge_lbl = QLabel("Выбран ПК")
         self.selected_badge_lbl.setObjectName("AccentBadge")
         ag.addWidget(self.selected_badge_lbl)
-        ag.addStretch(1)
+        ag.addSpacing(4)
 
         self.btn_remote = QPushButton("Управление")
         self.btn_remote.setIconSize(QSize(15, 15))
@@ -635,6 +645,7 @@ class TeacherMainWindow(QMainWindow):
         ag.addWidget(self.btn_msg)
         ag.addWidget(self.btn_ping)
         ag.addWidget(self.btn_power)
+        ag.addStretch(1)
 
         tb_outer.addWidget(self.grid_toolbar_widget)
         c_layout.addWidget(top_bar)
@@ -720,22 +731,78 @@ class TeacherMainWindow(QMainWindow):
 
         self.pages.addWidget(grid_page)
 
-        # ---------- PAGE 1: PowerShell Studio + Saved Commands ----------
+        # ---------- PAGE 1: PowerShell Studio + Saved Commands + MCP AI Bridge ----------
         ps_page = QWidget()
         ps_page.setObjectName("TransparentPage")
         ps_outer = QVBoxLayout(ps_page)
         ps_outer.setContentsMargins(0, 0, 0, 0)
+        ps_outer.setSpacing(14)
+
+        # Compact Liquid Glass MCP Control Bar for AI assistants
+        mcp_bar = GlassFrame(variant="card", radius=16)
+        mcp_lay = QHBoxLayout(mcp_bar)
+        mcp_lay.setContentsMargins(16, 12, 16, 12)
+        mcp_lay.setSpacing(12)
+
+        mcp_text_col = QVBoxLayout()
+        mcp_text_col.setContentsMargins(0, 0, 0, 0)
+        mcp_text_col.setSpacing(2)
+        mcp_title_row = QHBoxLayout()
+        mcp_title_row.setSpacing(8)
+        mcp_title_lbl = QLabel("MCP-сервер для нейросетей")
+        mcp_title_lbl.setObjectName("CardSectionTitle")
+        self.mcp_status_badge = QLabel("Выключен")
+        self.mcp_status_badge.setObjectName("MonBadge")
+        mcp_title_row.addWidget(mcp_title_lbl)
+        mcp_title_row.addWidget(self.mcp_status_badge)
+        mcp_title_row.addStretch(1)
+
+        self.mcp_sub_lbl = QLabel(
+            f"Подключение ИИ к PowerShell класса: http://127.0.0.1:{self.config.mcp_port}/mcp"
+        )
+        self.mcp_sub_lbl.setObjectName("MutedLabel")
+        mcp_text_col.addLayout(mcp_title_row)
+        mcp_text_col.addWidget(self.mcp_sub_lbl)
+        mcp_lay.addLayout(mcp_text_col, stretch=1)
+
+        self.btn_mcp_toggle = QPushButton("Включить MCP")
+        self.btn_mcp_toggle.setCheckable(True)
+        self.btn_mcp_toggle.setMinimumWidth(148)
+        self.btn_mcp_toggle.setIconSize(QSize(15, 15))
+        self.btn_mcp_toggle.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_mcp_toggle.setProperty("accent", "primary")
+        self.btn_mcp_toggle.toggled.connect(self._toggle_mcp_server)
+
+        self.btn_mcp_copy_cfg = QPushButton("Копировать JSON")
+        self.btn_mcp_copy_cfg.setMinimumWidth(156)
+        self.btn_mcp_copy_cfg.setIconSize(QSize(15, 15))
+        self.btn_mcp_copy_cfg.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_mcp_copy_cfg.setToolTip("Скопировать готовый конфиг mcpServers с токеном для подключения нейросети")
+        self.btn_mcp_copy_cfg.clicked.connect(self._copy_mcp_config)
+
+        self.btn_mcp_regen_token = QPushButton("Новый токен")
+        self.btn_mcp_regen_token.setMinimumWidth(128)
+        self.btn_mcp_regen_token.setIconSize(QSize(15, 15))
+        self.btn_mcp_regen_token.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_mcp_regen_token.setToolTip("Сгенерировать новый секретный Bearer-токен для MCP")
+        self.btn_mcp_regen_token.clicked.connect(self._regenerate_mcp_token)
+
+        mcp_lay.addWidget(self.btn_mcp_toggle)
+        mcp_lay.addWidget(self.btn_mcp_copy_cfg)
+        mcp_lay.addWidget(self.btn_mcp_regen_token)
+        ps_outer.addWidget(mcp_bar)
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
         splitter.setChildrenCollapsible(False)
+        splitter.setHandleWidth(16)
 
         # Left Glass Card: Saved Commands Library
         saved_panel = GlassFrame(variant="card", radius=18)
-        saved_panel.setMinimumWidth(270)
-        saved_panel.setMaximumWidth(350)
+        saved_panel.setMinimumWidth(280)
+        saved_panel.setMaximumWidth(360)
         sp = QVBoxLayout(saved_panel)
-        sp.setContentsMargins(16, 16, 16, 16)
-        sp.setSpacing(10)
+        sp.setContentsMargins(18, 18, 18, 18)
+        sp.setSpacing(12)
 
         sp_title = QLabel("СОХРАНЁННЫЕ КОМАНДЫ")
         sp_title.setObjectName("SectionLabel")
@@ -773,8 +840,8 @@ class TeacherMainWindow(QMainWindow):
         # Right Glass Card: Script Editor & Output Console
         exec_panel = GlassFrame(variant="card", radius=18)
         ep = QVBoxLayout(exec_panel)
-        ep.setContentsMargins(16, 16, 16, 16)
-        ep.setSpacing(10)
+        ep.setContentsMargins(18, 18, 18, 18)
+        ep.setSpacing(12)
 
         target_row = QHBoxLayout()
         target_row.setSpacing(10)
@@ -1016,7 +1083,7 @@ class TeacherMainWindow(QMainWindow):
         self.pages.setCurrentIndex(page_index)
         is_grid = page_index == 0
         self.search_input.setVisible(is_grid)
-        self.grid_toolbar_widget.setVisible(is_grid)
+        self.grid_toolbar_widget.setVisible(is_grid and bool(self._active_clients()))
         self._update_page_header(explicit_title=title)
         self._refresh_nav_icons()
 
@@ -1025,14 +1092,14 @@ class TeacherMainWindow(QMainWindow):
         online = len(self._active_clients())
         room_tag = "Все кабинеты" if self._room_filter == "__ALL_ROOMS__" else self.config.classroom_id
         if idx == 0:
-            self.page_title_lbl.setText(explicit_title or f"Экраны класса • {room_tag}")
+            self.page_title_lbl.setText(explicit_title or f"Экраны класса – {room_tag}")
             if online == 0:
-                self.page_subtitle_lbl.setText(f"Кабинет {room_tag} • Ожидание подключений в локальной сети")
+                self.page_subtitle_lbl.setText(f"Кабинет {room_tag} – ожидание подключений в локальной сети")
             else:
-                self.page_subtitle_lbl.setText(f"Онлайн: {online} ПК • Двойной клик для HD-управления")
+                self.page_subtitle_lbl.setText(f"Онлайн: {online} ПК – двойной клик для HD-управления")
         elif idx == 1:
             self.page_title_lbl.setText(explicit_title or "Терминал PowerShell")
-            self.page_subtitle_lbl.setText("Удалённое выполнение команд и библиотека сценариев класса")
+            self.page_subtitle_lbl.setText("Удалённое выполнение команд, библиотека сценариев и MCP для ИИ")
         else:
             self.page_title_lbl.setText(explicit_title or "Журнал событий")
             self.page_subtitle_lbl.setText("Аудит TLS-подключений, команд управления и событий безопасности")
@@ -1082,8 +1149,11 @@ class TeacherMainWindow(QMainWindow):
         self.btn_ping.setIcon(_themed_icon("pulse", t.text, dim, size=15))
         self.btn_power.setIcon(_themed_icon("power", "#FFFFFF", dim, size=15))
 
-        # Empty state & PowerShell & Audit Log buttons
+        # Empty state & PowerShell & MCP & Audit Log buttons
         self.empty_copy_key_btn.setIcon(make_icon("copy", "#FFFFFF", size=16))
+        self.btn_mcp_toggle.setIcon(make_icon("stop" if self.btn_mcp_toggle.isChecked() else "bolt", "#FFFFFF", size=15))
+        self.btn_mcp_copy_cfg.setIcon(make_icon("copy", t.text, size=15))
+        self.btn_mcp_regen_token.setIcon(make_icon("refresh", t.text, size=15))
         self.save_cmd_btn.setIcon(_themed_icon("plus", "#FFFFFF", dim, size=15))
         self.del_cmd_btn.setIcon(_themed_icon("trash", t.text, dim, size=15))
         self.run_saved_all_btn.setIcon(_themed_icon("bolt", "#FFFFFF", dim, size=15))
@@ -1165,14 +1235,93 @@ class TeacherMainWindow(QMainWindow):
         self.signals.client_updated.connect(self._on_client_updated)
         self.signals.screen_frame.connect(self._on_screen_frame)
         self.signals.log_line.connect(self._on_log_line)
+        self.signals.mcp_activity.connect(self._on_mcp_activity)
+
+    def _on_mcp_activity(self, line: str) -> None:
+        self.ps_output.appendPlainText(f"[MCP] {line}")
+
+    def _toggle_mcp_server(self, checked: bool) -> None:
+        if checked:
+            self.config.mcp_enabled = True
+            if not self.config.mcp_token:
+                self.config.mcp_token = generate_mcp_token()
+                self.mcp_server.token = self.config.mcp_token
+            save_config(self.config_path, self.config)
+            _spawn_task(self._start_mcp_async())
+        else:
+            self.config.mcp_enabled = False
+            save_config(self.config_path, self.config)
+            _spawn_task(self._stop_mcp_async())
+
+    async def _start_mcp_async(self) -> None:
+        try:
+            await self.mcp_server.start()
+            self._update_mcp_ui()
+            self.statusBar().showMessage(f"MCP-сервер запущен: {self.mcp_server.endpoint_url}", 5000)
+        except OSError as exc:
+            self.btn_mcp_toggle.blockSignals(True)
+            self.btn_mcp_toggle.setChecked(False)
+            self.btn_mcp_toggle.blockSignals(False)
+            self.config.mcp_enabled = False
+            save_config(self.config_path, self.config)
+            self._update_mcp_ui()
+            QMessageBox.warning(
+                self,
+                "Ошибка запуска MCP",
+                f"Не удалось открыть локальный порт {self.config.mcp_port}:\n{exc}",
+            )
+
+    async def _stop_mcp_async(self) -> None:
+        await self.mcp_server.stop()
+        self._update_mcp_ui()
+        self.statusBar().showMessage("MCP-сервер остановлен", 3000)
+
+    def _update_mcp_ui(self) -> None:
+        running = self.mcp_server.is_running
+        self.btn_mcp_toggle.blockSignals(True)
+        self.btn_mcp_toggle.setChecked(running)
+        self.btn_mcp_toggle.blockSignals(False)
+        if running:
+            self.mcp_status_badge.setText(f"Активен :{self.mcp_server.bound_port}")
+            self.mcp_status_badge.setObjectName("OnlineBadge")
+            self.btn_mcp_toggle.setText("Выключить MCP")
+            self.btn_mcp_toggle.setProperty("accent", "danger")
+            self.btn_mcp_toggle.setIcon(make_icon("stop", "#FFFFFF", size=15))
+        else:
+            self.mcp_status_badge.setText("Выключен")
+            self.mcp_status_badge.setObjectName("MonBadge")
+            self.btn_mcp_toggle.setText("Включить MCP")
+            self.btn_mcp_toggle.setProperty("accent", "primary")
+            self.btn_mcp_toggle.setIcon(make_icon("bolt", "#FFFFFF", size=15))
+        self.mcp_status_badge.style().unpolish(self.mcp_status_badge)
+        self.mcp_status_badge.style().polish(self.mcp_status_badge)
+        self.btn_mcp_toggle.style().unpolish(self.btn_mcp_toggle)
+        self.btn_mcp_toggle.style().polish(self.btn_mcp_toggle)
+
+    def _copy_mcp_config(self) -> None:
+        if not self.config.mcp_token:
+            self.config.mcp_token = generate_mcp_token()
+            self.mcp_server.token = self.config.mcp_token
+            save_config(self.config_path, self.config)
+        cfg_json = build_mcp_client_config(self.mcp_server.bound_port, self.config.mcp_token)
+        QApplication.clipboard().setText(cfg_json)
+        self.statusBar().showMessage("JSON-конфиг MCP скопирован в буфер обмена", 4000)
+
+    def _regenerate_mcp_token(self) -> None:
+        self.config.mcp_token = generate_mcp_token()
+        self.mcp_server.token = self.config.mcp_token
+        save_config(self.config_path, self.config)
+        self.statusBar().showMessage("Сгенерирован новый Bearer-токен MCP (скопируйте JSON заново)", 5000)
 
     async def start_server(self) -> None:
         try:
             await self.server.start()
+            if self.config.mcp_enabled:
+                await self._start_mcp_async()
             self._refresh_header_labels()
             self.statusBar().showMessage(
-                f"Сервер активен  •  TLS-порт {self.server.bound_port}  •  "
-                f"Автопоиск LAN {'ВКЛ' if self.config.discovery_enabled else 'ВЫКЛ'}"
+                f"Сервер активен, TLS-порт {self.server.bound_port}, "
+                f"автопоиск LAN {'ВКЛ' if self.config.discovery_enabled else 'ВЫКЛ'}"
             )
         except OSError as exc:
             QMessageBox.critical(
@@ -1187,19 +1336,19 @@ class TeacherMainWindow(QMainWindow):
         online = len(active)
         self.online_pill.setText(f"{online} онлайн")
         room_label = "Все кабинеты" if self._room_filter == "__ALL_ROOMS__" else self.config.classroom_id
-        self.room_sub_lbl.setText(f"Кабинет • {room_label}")
+        self.room_sub_lbl.setText(f"Кабинет {room_label}")
 
         secret_disp = self.config.class_secret if self.secret_toggle_btn.isChecked() else "••••••••••••"
         self.net_info_lbl.setText(
             f"Кабинет: {self.config.classroom_id}\n"
             f"LAN IP: {ips}\n"
-            f"TLS-порт: {self.server.bound_port}  •  Ключ: {secret_disp}"
+            f"TLS-порт: {self.server.bound_port}  Ключ: {secret_disp}"
         )
 
         lan_status = "Автопоиск LAN активен" if self.config.discovery_enabled else "Ручное подключение по IP"
         self.empty_hint.setText(
-            f"Запустите агент ученика на компьютерах кабинета «{self.config.classroom_id}» — они появятся здесь автоматически.\n\n"
-            f"ID кабинета: {self.config.classroom_id}   •   IP учителя: {ips}:{self.server.bound_port}\n"
+            f"Запустите агент ученика на компьютерах кабинета «{self.config.classroom_id}» – они появятся здесь автоматически.\n\n"
+            f"ID кабинета: {self.config.classroom_id}   IP учителя: {ips}:{self.server.bound_port}\n"
             f"{lan_status}"
         )
         self._refresh_classroom_combo()
@@ -1323,10 +1472,11 @@ class TeacherMainWindow(QMainWindow):
         sess = self._active_clients().get(self.selected_client_id or "")
         if sess is not None:
             lbl = sess.label
-            self.selected_badge_lbl.setText((lbl[:15] + "…") if len(lbl) > 16 else lbl)
+            short = (lbl[:18] + "…") if len(lbl) > 19 else lbl
+            self.selected_badge_lbl.setText(f"Выбран: {short}")
             self.selected_badge_lbl.setToolTip(f"{sess.label} ({sess.ip})")
         else:
-            self.selected_badge_lbl.setText("ПК не выбран")
+            self.selected_badge_lbl.setText("Выбран ПК")
             self.selected_badge_lbl.setToolTip("")
 
     def _update_toolbar_state(self) -> None:
@@ -1337,6 +1487,9 @@ class TeacherMainWindow(QMainWindow):
         any_unlocked = any(not s.locked for s in active.values())
         any_locked = any(s.locked for s in active.values())
         self._update_selected_badge()
+
+        # Hide empty action bar completely when 0 students are connected on Page 0
+        self.grid_toolbar_widget.setVisible(self.pages.currentIndex() == 0 and has_any)
 
         # Classroom delete pill state
         can_del_room = len(self.config.ensure_classrooms()) > 1 and self._room_filter != "__ALL_ROOMS__"
@@ -1417,6 +1570,11 @@ class TeacherMainWindow(QMainWindow):
             self.btn_power,
             has_any,
             "Управление питанием ПК" if has_any else "Нет подключённых учеников",
+        )
+        self._set_btn_state(
+            self.run_ps_btn,
+            has_any,
+            "Выполнить скрипт на выбранной цели" if has_any else "Нет подключённых учеников",
         )
         self._set_btn_state(
             self.run_all_ps_btn,
@@ -1758,5 +1916,6 @@ class TeacherMainWindow(QMainWindow):
     def closeEvent(self, event) -> None:
         for dlg in list(self.remote_dialogs.values()):
             dlg.close()
+        _spawn_task(self.mcp_server.stop())
         _spawn_task(self.server.stop())
         super().closeEvent(event)

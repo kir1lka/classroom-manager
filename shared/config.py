@@ -35,6 +35,9 @@ class TeacherConfig:
     tcp_port: int = 45455
     discovery_port: int = 45454
     discovery_enabled: bool = True
+    mcp_enabled: bool = False
+    mcp_port: int = 45460
+    mcp_token: str = ""
     theme: str = "dark"
     thumb_fps: float = 1.0
     live_fps: float = 12.0
