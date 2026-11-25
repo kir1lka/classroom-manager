@@ -39,6 +39,9 @@ class TeacherConfig:
     mcp_port: int = 45460
     mcp_token: str = ""
     theme: str = "dark"
+    grid_sort_mode: str = "natural_asc"
+    grid_card_width: int = 326
+    grid_custom_order: dict[str, list[str]] = field(default_factory=dict)
     thumb_fps: float = 1.0
     live_fps: float = 12.0
     thumb_width: int = 480

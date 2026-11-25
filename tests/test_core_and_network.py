@@ -431,3 +431,57 @@ async def test_end_to_end_tls_discovery_commands_and_stream(tmp_path: Path) -> N
             await client.stop()
     finally:
         await server.stop()
+
+
+def test_grid_sorting_and_custom_order(tmp_path: Path) -> None:
+    from types import SimpleNamespace
+
+    from teacher_app.network.server import StudentSession
+    from teacher_app.ui.main_window import sort_sessions
+
+    def _sess(cid: str, label: str, ip: str, locked: bool = False, ts: float = 0.0) -> StudentSession:
+        return StudentSession(
+            client_id=cid,
+            hostname=label,
+            display_name=label,
+            username="VR.AR",
+            os_info="Windows 11",
+            ip=ip,
+            screen_width=1920,
+            screen_height=1080,
+            writer=SimpleNamespace(),  # type: ignore[arg-type]
+            locked=locked,
+            connected_at=ts,
+        )
+
+    items = [
+        _sess("c5", "PC5", "192.168.0.46", locked=False, ts=1.0),
+        _sess("c10", "PC10", "192.168.0.4", locked=True, ts=2.0),
+        _sess("c1", "PC1", "192.168.0.5", locked=False, ts=3.0),
+        _sess("c2", "PC2", "192.168.0.27", locked=False, ts=4.0),
+    ]
+
+    assert [s.label for s in sort_sessions(items, "natural_asc")] == ["PC1", "PC2", "PC5", "PC10"]
+    assert [s.label for s in sort_sessions(items, "natural_desc")] == ["PC10", "PC5", "PC2", "PC1"]
+    assert [s.label for s in sort_sessions(items, "ip_asc")] == ["PC10", "PC1", "PC2", "PC5"]
+    assert [s.label for s in sort_sessions(items, "locked_first")] == ["PC10", "PC1", "PC2", "PC5"]
+    assert [s.label for s in sort_sessions(items, "connected_at")] == ["PC5", "PC10", "PC1", "PC2"]
+    assert [s.label for s in sort_sessions(items, "custom", ["c2", "c10", "c1", "c5"])] == [
+        "PC2",
+        "PC10",
+        "PC1",
+        "PC5",
+    ]
+
+    cfg_path = tmp_path / "teacher_grid.json"
+    cfg = TeacherConfig(
+        initialized=True,
+        grid_sort_mode="custom",
+        grid_card_width=420,
+        grid_custom_order={"vr1": ["c2", "c10"]},
+    )
+    save_config(cfg_path, cfg)
+    loaded = load_config(cfg_path, TeacherConfig)
+    assert loaded.grid_sort_mode == "custom"
+    assert loaded.grid_card_width == 420
+    assert loaded.grid_custom_order == {"vr1": ["c2", "c10"]}

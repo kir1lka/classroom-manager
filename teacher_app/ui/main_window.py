@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import re
 from pathlib import Path
 from typing import Any
 
-from PySide6.QtCore import QObject, QRectF, QSize, Qt, Signal
-from PySide6.QtGui import QAction, QFont, QIcon, QPainter, QPainterPath, QPixmap
+from PySide6.QtCore import QMimeData, QObject, QPoint, QRectF, QSize, Qt, Signal
+from PySide6.QtGui import QAction, QDrag, QFont, QIcon, QPainter, QPainterPath, QPixmap
 from PySide6.QtWidgets import (
     QApplication,
     QButtonGroup,
@@ -25,6 +26,7 @@ from PySide6.QtWidgets import (
     QPlainTextEdit,
     QPushButton,
     QScrollArea,
+    QSlider,
     QSplitter,
     QStackedWidget,
     QVBoxLayout,
@@ -49,6 +51,68 @@ from teacher_app.ui.theme import (
     make_brand_pixmap,
     make_icon,
 )
+
+
+CARD_DRAG_MIME = "application/x-classroom-card-id"
+CARD_MIN_WIDTH = 220
+CARD_MAX_WIDTH = 540
+CARD_DEFAULT_WIDTH = 326
+
+GRID_SORT_MODES: list[tuple[str, str]] = [
+    ("natural_asc", "По порядку (1 → 10)"),
+    ("natural_desc", "Обратный (10 → 1)"),
+    ("custom", "Вручную (перетаскиванием)"),
+    ("ip_asc", "По IP-адресу"),
+    ("locked_first", "Заблокированные сверху"),
+    ("connected_at", "По подключению"),
+]
+
+
+def _natural_sort_key(text: str) -> list[tuple[int, int | str]]:
+    """Natural alphanumeric sort key so PC1, PC2, ..., PC9, PC10 order intuitively."""
+    parts = re.split(r"(\d+)", (text or "").strip().lower())
+    key: list[tuple[int, int | str]] = []
+    for part in parts:
+        if not part:
+            continue
+        if part.isdigit():
+            key.append((0, int(part)))
+        else:
+            key.append((1, part))
+    return key
+
+
+def _ip_sort_key(ip: str) -> tuple[int, ...]:
+    """Numeric IPv4 sort key so 192.168.0.4 sorts before 192.168.0.27."""
+    parts = (ip or "").strip().split(".")
+    if len(parts) == 4 and all(p.isdigit() for p in parts):
+        return tuple(int(p) for p in parts)
+    return (999, 999, 999, 999)
+
+
+def sort_sessions(
+    sessions: list[StudentSession],
+    mode: str,
+    custom_order: list[str] | None = None,
+) -> list[StudentSession]:
+    """Sort student sessions according to the selected grid sort mode."""
+    if mode == "natural_desc":
+        return sorted(sessions, key=lambda s: _natural_sort_key(s.label), reverse=True)
+    if mode == "ip_asc":
+        return sorted(sessions, key=lambda s: (_ip_sort_key(s.ip), _natural_sort_key(s.label)))
+    if mode == "locked_first":
+        return sorted(sessions, key=lambda s: (0 if s.locked else 1, _natural_sort_key(s.label)))
+    if mode == "connected_at":
+        return sorted(sessions, key=lambda s: (s.connected_at, _natural_sort_key(s.label)))
+    if mode == "custom" and custom_order:
+        rank = {cid: idx for idx, cid in enumerate(custom_order)}
+        fallback = len(rank)
+        return sorted(
+            sessions,
+            key=lambda s: (rank.get(s.client_id, fallback), _natural_sort_key(s.label)),
+        )
+    # Default: natural_asc (PC1, PC2, ..., PC10)
+    return sorted(sessions, key=lambda s: _natural_sort_key(s.label))
 
 
 def _spawn_task(coro: Any) -> None:
@@ -99,14 +163,19 @@ class StudentCardWidget(GlassFrame):
     clicked = Signal(str)
     double_clicked = Signal(str)
     context_action = Signal(str, str)
+    card_reordered = Signal(str, str)
 
-    def __init__(self, session: StudentSession, parent=None) -> None:
+    def __init__(self, session: StudentSession, card_width: int = CARD_DEFAULT_WIDTH, parent=None) -> None:
         super().__init__(variant="card", radius=18.0, interactive=True, parent=parent)
         self.client_id = session.client_id
         self._locked = bool(session.locked)
         self._search_blob = ""
+        self._last_session = session
+        self._last_pixmap: QPixmap | None = None
+        self._drag_start_pos: QPoint | None = None
+        self._card_width = CARD_DEFAULT_WIDTH
 
-        self.setFixedSize(326, 272)
+        self.setAcceptDrops(True)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
 
         layout = QVBoxLayout(self)
@@ -139,7 +208,6 @@ class StudentCardWidget(GlassFrame):
         self.preview_lbl = QLabel("Ожидание кадра...")
         self.preview_lbl.setObjectName("PreviewBox")
         self.preview_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        self.preview_lbl.setFixedSize(300, 168)
         layout.addWidget(self.preview_lbl)
 
         # Footer: left telemetry stack + right compact #IconPill quick actions
@@ -182,7 +250,39 @@ class StudentCardWidget(GlassFrame):
         footer.addWidget(self.quick_lock_btn)
         layout.addLayout(footer)
 
+        self.set_card_width(card_width)
         self.update_session(session)
+
+    def set_card_width(self, width: int) -> None:
+        w = max(CARD_MIN_WIDTH, min(CARD_MAX_WIDTH, int(width)))
+        self._card_width = w
+        preview_w = max(180, w - 26)
+        preview_h = max(100, int(round(preview_w * 9.0 / 16.0)))
+        card_h = preview_h + 104
+        self.setFixedSize(w, card_h)
+        self.preview_lbl.setFixedSize(preview_w, preview_h)
+        if self._last_pixmap is not None and not self._last_pixmap.isNull():
+            self._render_pixmap(self._last_pixmap)
+        if self._last_session is not None:
+            self._update_elided_texts(self._last_session)
+
+    def _update_elided_texts(self, session: StudentSession) -> None:
+        scale = self._card_width / float(CARD_DEFAULT_WIDTH)
+        title_lim = max(12, int(round(20 * scale)))
+        meta_lim = max(18, int(round(33 * scale)))
+        win_lim = max(18, int(round(34 * scale)))
+
+        label_text = session.label
+        self.title_lbl.setText((label_text[:title_lim] + "…") if len(label_text) > title_lim + 1 else label_text)
+        self.title_lbl.setToolTip(f"{session.label} ({session.hostname}) — перетащите для смены порядка")
+
+        ping_str = f", {session.last_ping_ms:.0f} мс" if session.last_ping_ms is not None else ""
+        meta_raw = f"{session.username} @ {session.ip}{ping_str}"
+        self.meta_lbl.setText((meta_raw[:meta_lim] + "…") if len(meta_raw) > meta_lim + 1 else meta_raw)
+
+        win = session.active_window.strip()
+        self.window_lbl.setText((win[:win_lim] + "…") if len(win) > win_lim + 1 else (win or "Рабочий стол"))
+        self.window_lbl.setToolTip(win or "Рабочий стол")
 
     def _on_quick_remote(self) -> None:
         self.clicked.emit(self.client_id)
@@ -214,22 +314,12 @@ class StudentCardWidget(GlassFrame):
         self.update()
 
     def update_session(self, session: StudentSession) -> None:
+        self._last_session = session
         self._locked = bool(session.locked)
         self._search_blob = (
             f"{session.label} {session.hostname} {session.username} {session.ip} {session.active_window}"
         ).lower()
-
-        label_text = session.label
-        self.title_lbl.setText((label_text[:20] + "…") if len(label_text) > 21 else label_text)
-        self.title_lbl.setToolTip(f"{session.label} ({session.hostname})")
-
-        ping_str = f", {session.last_ping_ms:.0f} мс" if session.last_ping_ms is not None else ""
-        meta_raw = f"{session.username} @ {session.ip}{ping_str}"
-        self.meta_lbl.setText((meta_raw[:33] + "…") if len(meta_raw) > 34 else meta_raw)
-
-        win = session.active_window.strip()
-        self.window_lbl.setText((win[:34] + "…") if len(win) > 35 else (win or "Рабочий стол"))
-        self.window_lbl.setToolTip(win or "Рабочий стол")
+        self._update_elided_texts(session)
 
         mon_count = len(session.monitors)
         if mon_count > 1:
@@ -253,10 +343,7 @@ class StudentCardWidget(GlassFrame):
         self.style().polish(self)
         self.update()
 
-    def update_thumbnail(self, jpeg_bytes: bytes) -> None:
-        pm = QPixmap()
-        if not pm.loadFromData(jpeg_bytes, "JPG"):
-            return
+    def _render_pixmap(self, pm: QPixmap) -> None:
         target_size = self.preview_lbl.size()
         inner_w = max(1, target_size.width() - 2)
         inner_h = max(1, target_size.height() - 2)
@@ -276,10 +363,72 @@ class StudentCardWidget(GlassFrame):
         painter.end()
         self.preview_lbl.setPixmap(rounded)
 
+    def update_thumbnail(self, jpeg_bytes: bytes) -> None:
+        pm = QPixmap()
+        if not pm.loadFromData(jpeg_bytes, "JPG"):
+            return
+        self._last_pixmap = pm
+        self._render_pixmap(pm)
+
     def mousePressEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
+            self._drag_start_pos = event.position().toPoint()
             self.clicked.emit(self.client_id)
         super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event) -> None:
+        if (
+            self._drag_start_pos is not None
+            and (event.buttons() & Qt.MouseButton.LeftButton)
+            and (event.position().toPoint() - self._drag_start_pos).manhattanLength()
+            >= QApplication.startDragDistance()
+        ):
+            self._drag_start_pos = None
+            drag = QDrag(self)
+            mime = QMimeData()
+            mime.setData(CARD_DRAG_MIME, self.client_id.encode("utf-8"))
+            drag.setMimeData(mime)
+            snap = self.grab().scaledToWidth(
+                min(220, self.width()),
+                Qt.TransformationMode.SmoothTransformation,
+            )
+            drag.setPixmap(snap)
+            drag.setHotSpot(QPoint(snap.width() // 2, 24))
+            drag.exec(Qt.DropAction.MoveAction)
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event) -> None:
+        self._drag_start_pos = None
+        super().mouseReleaseEvent(event)
+
+    def dragEnterEvent(self, event) -> None:
+        if event.mimeData().hasFormat(CARD_DRAG_MIME):
+            src_id = bytes(event.mimeData().data(CARD_DRAG_MIME)).decode("utf-8", errors="ignore")
+            if src_id and src_id != self.client_id:
+                event.acceptProposedAction()
+                self.setProperty("selected", "true")
+                self.style().unpolish(self)
+                self.style().polish(self)
+                self.update()
+                return
+        super().dragEnterEvent(event)
+
+    def dragLeaveEvent(self, event) -> None:
+        # Restore real selection state via parent refresh
+        win = self.window()
+        if hasattr(win, "selected_client_id"):
+            self.set_selected(getattr(win, "selected_client_id") == self.client_id)
+        super().dragLeaveEvent(event)
+
+    def dropEvent(self, event) -> None:
+        if event.mimeData().hasFormat(CARD_DRAG_MIME):
+            src_id = bytes(event.mimeData().data(CARD_DRAG_MIME)).decode("utf-8", errors="ignore")
+            if src_id and src_id != self.client_id:
+                event.acceptProposedAction()
+                self.card_reordered.emit(src_id, self.client_id)
+                return
+        super().dropEvent(event)
 
     def mouseDoubleClickEvent(self, event) -> None:
         if event.button() == Qt.MouseButton.LeftButton:
@@ -582,17 +731,77 @@ class TeacherMainWindow(QMainWindow):
         tb_header.addLayout(title_stack)
         tb_header.addStretch(1)
 
+        self.grid_view_controls = QWidget()
+        self.grid_view_controls.setObjectName("TransparentPage")
+        gvc = QHBoxLayout(self.grid_view_controls)
+        gvc.setContentsMargins(0, 0, 0, 0)
+        gvc.setSpacing(8)
+
+        # Sort mode selector
+        self.sort_combo = QComboBox()
+        self.sort_combo.setMinimumWidth(196)
+        self.sort_combo.setToolTip("Порядок отображения карточек ПК учеников")
+        for key, label in GRID_SORT_MODES:
+            self.sort_combo.addItem(label, key)
+        cur_sort_idx = self.sort_combo.findData(self.config.grid_sort_mode)
+        self.sort_combo.setCurrentIndex(cur_sort_idx if cur_sort_idx >= 0 else 0)
+        self.sort_combo.currentIndexChanged.connect(self._on_sort_mode_changed)
+
+        # Card size controls (- [slider] + width)
+        size_pod = GlassFrame(variant="inset", radius=12)
+        sp_row = QHBoxLayout(size_pod)
+        sp_row.setContentsMargins(8, 3, 8, 3)
+        sp_row.setSpacing(6)
+
+        self.btn_size_down = QPushButton("−")
+        self.btn_size_down.setObjectName("IconPill")
+        self.btn_size_down.setFixedSize(24, 24)
+        self.btn_size_down.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_size_down.setToolTip("Уменьшить карточки")
+        self.btn_size_down.clicked.connect(lambda: self._step_card_size(-36))
+
+        self.card_size_slider = QSlider(Qt.Orientation.Horizontal)
+        self.card_size_slider.setRange(CARD_MIN_WIDTH, CARD_MAX_WIDTH)
+        self.card_size_slider.setSingleStep(16)
+        self.card_size_slider.setPageStep(36)
+        self.card_size_slider.setFixedWidth(92)
+        self.card_size_slider.setToolTip("Размер карточек экранов учеников")
+        init_w = max(CARD_MIN_WIDTH, min(CARD_MAX_WIDTH, int(self.config.grid_card_width or CARD_DEFAULT_WIDTH)))
+        self.card_size_slider.setValue(init_w)
+        self.card_size_slider.valueChanged.connect(self._on_card_size_changed)
+
+        self.btn_size_up = QPushButton("+")
+        self.btn_size_up.setObjectName("IconPill")
+        self.btn_size_up.setFixedSize(24, 24)
+        self.btn_size_up.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_size_up.setToolTip("Увеличить карточки")
+        self.btn_size_up.clicked.connect(lambda: self._step_card_size(36))
+
+        self.card_size_lbl = QLabel(self._format_size_tag(init_w))
+        self.card_size_lbl.setObjectName("MutedLabel")
+        self.card_size_lbl.setFixedWidth(34)
+        self.card_size_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+
+        sp_row.addWidget(self.btn_size_down)
+        sp_row.addWidget(self.card_size_slider)
+        sp_row.addWidget(self.btn_size_up)
+        sp_row.addWidget(self.card_size_lbl)
+
         self.search_input = QLineEdit()
         self.search_input.setObjectName("SearchPill")
         self.search_input.setPlaceholderText("Поиск ПК, имени или IP...")
         self.search_input.setClearButtonEnabled(True)
-        self.search_input.setFixedWidth(260)
+        self.search_input.setFixedWidth(220)
         self._search_icon_action = self.search_input.addAction(
             make_icon("search", size=15),
             QLineEdit.ActionPosition.LeadingPosition,
         )
         self.search_input.textChanged.connect(lambda _t: self._relayout_grid())
-        tb_header.addWidget(self.search_input, alignment=Qt.AlignmentFlag.AlignVCenter)
+
+        gvc.addWidget(self.sort_combo)
+        gvc.addWidget(size_pod)
+        gvc.addWidget(self.search_input)
+        tb_header.addWidget(self.grid_view_controls, alignment=Qt.AlignmentFlag.AlignVCenter)
         tb_outer.addLayout(tb_header)
 
         # Contextual Workstation Action Bar (shown ONLY on Page 0 when students are connected)
@@ -1087,7 +1296,7 @@ class TeacherMainWindow(QMainWindow):
     def _switch_page(self, page_index: int, title: str | None = None) -> None:
         self.pages.setCurrentIndex(page_index)
         is_grid = page_index == 0
-        self.search_input.setVisible(is_grid)
+        self.grid_view_controls.setVisible(is_grid)
         self.grid_toolbar_widget.setVisible(is_grid and bool(self._active_clients()))
         self._update_page_header(explicit_title=title)
         self._refresh_nav_icons()
@@ -1359,6 +1568,75 @@ class TeacherMainWindow(QMainWindow):
         self._refresh_classroom_combo()
         self._update_page_header()
 
+    @staticmethod
+    def _format_size_tag(width: int) -> str:
+        if width <= 260:
+            return "S"
+        if width <= 350:
+            return "M"
+        if width <= 440:
+            return "L"
+        return "XL"
+
+    def _current_order_room_key(self) -> str:
+        return (self._room_filter or self.config.classroom_id or "default").strip().lower()
+
+    def _on_sort_mode_changed(self) -> None:
+        mode = str(self.sort_combo.currentData() or "natural_asc")
+        if self.config.grid_sort_mode != mode:
+            self.config.grid_sort_mode = mode
+            save_config(self.config_path, self.config)
+        self._relayout_grid()
+
+    def _step_card_size(self, delta: int) -> None:
+        val = max(CARD_MIN_WIDTH, min(CARD_MAX_WIDTH, self.card_size_slider.value() + delta))
+        self.card_size_slider.setValue(val)
+
+    def _on_card_size_changed(self, value: int) -> None:
+        w = max(CARD_MIN_WIDTH, min(CARD_MAX_WIDTH, int(value)))
+        self.card_size_lbl.setText(self._format_size_tag(w))
+        if self.config.grid_card_width != w:
+            self.config.grid_card_width = w
+            save_config(self.config_path, self.config)
+        for card in self.cards.values():
+            card.set_card_width(w)
+        self._relayout_grid()
+
+    def _on_card_reordered(self, source_id: str, target_id: str) -> None:
+        if source_id == target_id:
+            return
+        active = self._active_clients()
+        if source_id not in active or target_id not in active:
+            return
+
+        room_key = self._current_order_room_key()
+        current_sorted = sort_sessions(
+            list(active.values()),
+            self.config.grid_sort_mode,
+            self.config.grid_custom_order.get(room_key),
+        )
+        order = [s.client_id for s in current_sorted]
+        if source_id not in order or target_id not in order:
+            return
+
+        order.remove(source_id)
+        target_idx = order.index(target_id)
+        order.insert(target_idx, source_id)
+
+        self.config.grid_custom_order[room_key] = order
+        self.config.grid_sort_mode = "custom"
+        save_config(self.config_path, self.config)
+
+        self.sort_combo.blockSignals(True)
+        idx = self.sort_combo.findData("custom")
+        if idx >= 0:
+            self.sort_combo.setCurrentIndex(idx)
+        self.sort_combo.blockSignals(False)
+
+        self._select_client(source_id)
+        self._relayout_grid()
+        self.statusBar().showMessage("Порядок ПК сохранён (режим: Вручную)", 3500)
+
     def _relayout_grid(self) -> None:
         while self.grid_layout.count():
             self.grid_layout.takeAt(0)
@@ -1376,10 +1654,16 @@ class TeacherMainWindow(QMainWindow):
 
         self.empty_state_wrap.setVisible(False)
         query = self.search_input.text().strip().lower()
+        room_key = self._current_order_room_key()
+        ordered_sessions = sort_sessions(
+            list(active.values()),
+            self.config.grid_sort_mode,
+            self.config.grid_custom_order.get(room_key),
+        )
 
         matched: list[StudentCardWidget] = []
-        for cid in active.keys():
-            card = self.cards.get(cid)
+        for sess in ordered_sessions:
+            card = self.cards.get(sess.client_id)
             if card is None:
                 continue
             if card.matches_query(query):
@@ -1397,9 +1681,10 @@ class TeacherMainWindow(QMainWindow):
         self.no_match_lbl.setVisible(False)
         self.scroll_area.setVisible(True)
 
+        card_w = max(CARD_MIN_WIDTH, min(CARD_MAX_WIDTH, int(self.config.grid_card_width or CARD_DEFAULT_WIDTH)))
         vp_w = self.scroll_area.viewport().width()
-        avail_w = vp_w if vp_w >= 320 else max(340, self.width() - 330)
-        cols = max(1, (avail_w + 14) // 340)
+        avail_w = vp_w if vp_w >= 260 else max(340, self.width() - 330)
+        cols = max(1, (avail_w + 14) // (card_w + 14))
         for idx, card in enumerate(matched):
             r, c = divmod(idx, cols)
             self.grid_layout.addWidget(card, r, c)
@@ -1411,13 +1696,16 @@ class TeacherMainWindow(QMainWindow):
 
     def _on_client_connected(self, session: StudentSession) -> None:
         card = self.cards.get(session.client_id)
+        card_w = max(CARD_MIN_WIDTH, min(CARD_MAX_WIDTH, int(self.config.grid_card_width or CARD_DEFAULT_WIDTH)))
         if card is None:
-            card = StudentCardWidget(session)
+            card = StudentCardWidget(session, card_width=card_w)
             card.clicked.connect(self._select_client)
             card.double_clicked.connect(self._open_remote_for)
             card.context_action.connect(self._handle_card_action)
+            card.card_reordered.connect(self._on_card_reordered)
             self.cards[session.client_id] = card
         else:
+            card.set_card_width(card_w)
             card.update_session(session)
 
         if self.selected_client_id is None:
@@ -1453,7 +1741,7 @@ class TeacherMainWindow(QMainWindow):
         if card is not None:
             card.update_session(session)
         self._update_toolbar_state()
-        if self.search_input.text().strip():
+        if self.search_input.text().strip() or self.config.grid_sort_mode == "locked_first":
             self._relayout_grid()
 
     def _on_screen_frame(self, client_id: str, _w: int, _h: int, _mode_int: int, jpeg_bytes: bytes) -> None:
