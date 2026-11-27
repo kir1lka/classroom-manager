@@ -28,6 +28,7 @@ def get_app_data_dir(role: str) -> Path:
 class TeacherConfig:
     initialized: bool = False
     password_hash: str = ""
+    remember_login: bool = False
     classroom_id: str = "Cab-101"
     class_secret: str = ""
     classrooms: list[dict[str, str]] = field(default_factory=list)

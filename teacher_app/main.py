@@ -27,16 +27,23 @@ def main() -> int:
     config = load_config(config_path, TeacherConfig)
     app.setStyleSheet(get_stylesheet(config.theme))
 
-    # First-run setup or password login
+    # First-run setup or password login (skipped when "remember_login" is enabled)
     if not config.initialized or not config.password_hash:
         wizard = TeacherSetupWizardDialog(config)
         if wizard.exec() != TeacherSetupWizardDialog.DialogCode.Accepted:
             return 0
         save_config(config_path, config)
-    else:
-        login = TeacherLoginDialog(config.password_hash, config.classroom_id)
+    elif not config.remember_login:
+        login = TeacherLoginDialog(
+            config.password_hash,
+            config.classroom_id,
+            remember_login=config.remember_login,
+        )
         if login.exec() != TeacherLoginDialog.DialogCode.Accepted:
             return 0
+        if login.remember_login != config.remember_login:
+            config.remember_login = login.remember_login
+            save_config(config_path, config)
 
     signals = ServerSignals()
     setup_logging(data_dir / "logs", "teacher", ui_callback=signals.log_line.emit)

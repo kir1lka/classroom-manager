@@ -169,6 +169,10 @@ class TeacherSetupWizardDialog(LiquidDialog):
 
         sec_form.addRow("Пароль учителя:", pwd_row)
         sec_form.addRow("Подтверждение:", self.password_confirm)
+        self.remember_check = QCheckBox("Сохранить пароль (не спрашивать при каждом запуске)")
+        self.remember_check.setChecked(bool(config.remember_login))
+        self.remember_check.setCursor(Qt.CursorShape.PointingHandCursor)
+        sec_form.addRow("", self.remember_check)
         sec_form.addRow("ID кабинета:", self.room_edit)
         sec_form.addRow("Ключ класса (PSK):", secret_row)
         sec_v.addLayout(sec_form)
@@ -251,6 +255,7 @@ class TeacherSetupWizardDialog(LiquidDialog):
             return
 
         self.config.password_hash = hash_password(pwd)
+        self.config.remember_login = self.remember_check.isChecked()
         self.config.classroom_id = room
         self.config.class_secret = secret
         self.config.tcp_port = self.tcp_port_spin.value()
@@ -261,9 +266,15 @@ class TeacherSetupWizardDialog(LiquidDialog):
 
 
 class TeacherLoginDialog(LiquidDialog):
-    """Password authentication prompt shown every time TeacherApp starts."""
+    """Password authentication prompt shown when TeacherApp starts."""
 
-    def __init__(self, password_hash: str, classroom_id: str, parent=None) -> None:
+    def __init__(
+        self,
+        password_hash: str,
+        classroom_id: str,
+        remember_login: bool = False,
+        parent=None,
+    ) -> None:
         super().__init__(parent)
         self._password_hash = password_hash
         self.setWindowTitle("Авторизация — Панель учителя")
@@ -332,6 +343,11 @@ class TeacherLoginDialog(LiquidDialog):
         input_row.addWidget(eye_btn)
         card_v.addLayout(input_row)
 
+        self.remember_check = QCheckBox("Сохранить пароль (входить автоматически)")
+        self.remember_check.setChecked(bool(remember_login))
+        self.remember_check.setCursor(Qt.CursorShape.PointingHandCursor)
+        card_v.addWidget(self.remember_check)
+
         self.error_label = QLabel("")
         self.error_label.setStyleSheet("color: #FF453A; font-size: 12px; font-weight: 600;")
         self.error_label.setWordWrap(True)
@@ -364,6 +380,10 @@ class TeacherLoginDialog(LiquidDialog):
         layout.addLayout(btn_row)
 
         self.password_edit.setFocus()
+
+    @property
+    def remember_login(self) -> bool:
+        return self.remember_check.isChecked()
 
     def _clear_error(self) -> None:
         if self.error_label.text():
@@ -562,6 +582,12 @@ class TeacherSettingsDialog(LiquidDialog):
         pwd_grid_top.addWidget(self.confirm_pwd, stretch=1)
         pwd_grid_top.addWidget(pwd_eye)
         pwd_v.addLayout(pwd_grid_top)
+
+        self.remember_check = QCheckBox("Сохранять пароль (входить без повторного ввода при запуске)")
+        self.remember_check.setChecked(bool(config.remember_login))
+        self.remember_check.setCursor(Qt.CursorShape.PointingHandCursor)
+        pwd_v.addWidget(self.remember_check)
+
         layout.addWidget(pwd_card)
 
         # Action Buttons
@@ -630,6 +656,7 @@ class TeacherSettingsDialog(LiquidDialog):
         self.config.discovery_enabled = self.disc_check.isChecked()
         self.config.thumb_fps = self.thumb_fps_spin.value()
         self.config.live_fps = self.live_fps_spin.value()
+        self.config.remember_login = self.remember_check.isChecked()
         self.accept()
 
 

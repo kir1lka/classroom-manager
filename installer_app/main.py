@@ -49,7 +49,7 @@ from teacher_app.ui.theme import (
 
 GITHUB_REPO_URL = "https://github.com/kir1lka/classroom-manager"
 GITHUB_RELEASES_URL = "https://github.com/kir1lka/classroom-manager/releases"
-INSTALLER_VERSION = "v3.0.0"
+INSTALLER_VERSION = "v3.0.1"
 
 USEFUL_COMMANDS: list[tuple[str, str, str]] = [
     (
