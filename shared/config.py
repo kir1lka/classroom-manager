@@ -49,9 +49,12 @@ class TeacherConfig:
     thumb_width: int = 480
     live_width: int = 1920
     live_quality: int = 88
-    demo_fps: float = 10.0
+    demo_fps: float = 15.0
     demo_width: int = 1920
     demo_quality: int = 88
+    demo_fullscreen: bool = True
+    demo_monitor: int = 1
+    demo_title: str = ""
     saved_commands: list[dict[str, str]] = field(
         default_factory=lambda: [
             {

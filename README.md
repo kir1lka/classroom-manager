@@ -6,7 +6,7 @@
   <p><strong>Современная система управления компьютерным классом для Windows LAN в дизайне Liquid Glass — с единым установщиком, удалённым управлением до 60 FPS, поддержкой нескольких учителей и кабинетов, постоянным списком ПК (ONLINE/OFFLINE) и встроенным MCP-сервером для нейросетей.</strong></p>
 
   <p>
-    <a href="https://github.com/kir1lka/classroom-manager/releases/latest"><img src="https://img.shields.io/badge/Download-v3.0.1%20Setup%20(.exe)-0A84FF?logo=github" alt="Latest Release" /></a>
+    <a href="https://github.com/kir1lka/classroom-manager/releases/latest"><img src="https://img.shields.io/badge/Download-v3.1.0%20Setup%20(.exe)-0A84FF?logo=github" alt="Latest Release" /></a>
     <img src="https://img.shields.io/badge/OS-Windows%2010%2F11-0078D6?logo=windows&logoColor=white" alt="Platform" />
     <img src="https://img.shields.io/badge/Stream-Up%20to%2060%20FPS-22C55E" alt="60 FPS" />
     <img src="https://img.shields.io/badge/UI-PySide6%20Liquid%20Glass-41CD52?logo=qt&logoColor=white" alt="UI" />

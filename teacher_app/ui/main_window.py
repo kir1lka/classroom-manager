@@ -39,7 +39,7 @@ from student_app.handlers.screen_capture import list_monitors
 from teacher_app.network.discovery import get_local_ipv4_addresses
 from teacher_app.network.mcp_server import ClassroomMCPServer, build_mcp_client_config, generate_mcp_token
 from teacher_app.network.server import StudentSession, TeacherServer
-from teacher_app.ui.dialogs import AddClassroomDialog, TeacherSettingsDialog
+from teacher_app.ui.dialogs import AddClassroomDialog, DemoBroadcastDialog, TeacherSettingsDialog
 from teacher_app.ui.file_transfer_dialog import FileTransferDialog
 from teacher_app.ui.remote_view import RemoteControlDialog
 from teacher_app.ui.theme import (
@@ -474,6 +474,9 @@ class StudentCardWidget(GlassFrame):
         if self._online:
             actions = [
                 ("control", "remote", t.accent, "Открыть HD-управление ПК"),
+                ("demo_single", "cast", t.accent, "Показать экран учителя этому ПК"),
+                ("demo_config", "settings", t.text, "Настроить демонстрацию (выбрать ПК)..."),
+                ("sep", "", "", ""),
                 ("lock", "lock", t.danger, "Заблокировать экран"),
                 ("unlock", "unlock", t.success, "Разблокировать экран"),
                 ("send_file", "send_file", t.text, "Отправить файлы на этот ПК..."),
@@ -656,16 +659,34 @@ class TeacherMainWindow(QMainWindow):
         self.demo_mon_combo = QComboBox()
         for mon in self._teacher_monitors:
             self.demo_mon_combo.addItem(f"Экран показа: {mon['name']}", int(mon["index"]))
+        if len(self._teacher_monitors) > 1:
+            self.demo_mon_combo.addItem("Экран показа: Все мониторы", 0)
+        mon_idx = self.demo_mon_combo.findData(int(self.config.demo_monitor))
+        if mon_idx >= 0:
+            self.demo_mon_combo.setCurrentIndex(mon_idx)
         self.demo_mon_combo.setVisible(len(self._teacher_monitors) > 1)
         sb.addWidget(self.demo_mon_combo)
 
+        demo_row = QHBoxLayout()
+        demo_row.setSpacing(6)
         self.btn_demo = QPushButton("Демонстрация экрана")
         self.btn_demo.setCheckable(True)
         self.btn_demo.setIconSize(QSize(17, 17))
         self.btn_demo.setCursor(Qt.CursorShape.PointingHandCursor)
         self.btn_demo.setProperty("accent", "primary")
         self.btn_demo.toggled.connect(self._toggle_demo_broadcast)
-        sb.addWidget(self.btn_demo)
+
+        self.btn_demo_settings = QPushButton()
+        self.btn_demo_settings.setObjectName("IconPill")
+        self.btn_demo_settings.setFixedSize(36, 36)
+        self.btn_demo_settings.setIconSize(QSize(16, 16))
+        self.btn_demo_settings.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_demo_settings.setToolTip("Настроить демонстрацию и выбрать ПК...")
+        self.btn_demo_settings.clicked.connect(lambda: self._open_demo_settings_dialog())
+
+        demo_row.addWidget(self.btn_demo, stretch=1)
+        demo_row.addWidget(self.btn_demo_settings)
+        sb.addLayout(demo_row)
 
         self.btn_files = QPushButton("Отправить файлы")
         self.btn_files.setIconSize(QSize(17, 17))
@@ -1411,6 +1432,7 @@ class TeacherMainWindow(QMainWindow):
             self.btn_demo.setIcon(_themed_icon("stop", "#FFFFFF", dim, size=17))
         else:
             self.btn_demo.setIcon(_themed_icon("cast", "#FFFFFF", dim, size=17))
+        self.btn_demo_settings.setIcon(_themed_icon("settings", t.text, dim, size=16))
 
         self.btn_files.setIcon(_themed_icon("send_file", t.text, dim, size=17))
         self.btn_lock_all.setIcon(_themed_icon("lock", t.danger, dim, size=16))
@@ -2161,24 +2183,105 @@ class TeacherMainWindow(QMainWindow):
         self._refresh_saved_commands()
 
     # ---------- Teacher Demo Broadcast ----------
-    def _toggle_demo_broadcast(self, checked: bool) -> None:
+    def _set_demo_button_state(self, active: bool, target_count: int | None = None) -> None:
         t = get_tokens(self.config.theme)
-        if checked:
-            self.btn_demo.setText("Остановить показ")
+        self.btn_demo.blockSignals(True)
+        self.btn_demo.setChecked(active)
+        self.btn_demo.blockSignals(False)
+        if active:
+            label = (
+                f"Остановить ({target_count} ПК)"
+                if target_count is not None
+                else "Остановить показ"
+            )
+            self.btn_demo.setText(label)
             self.btn_demo.setProperty("accent", "danger")
             self.btn_demo.setIcon(_themed_icon("stop", "#FFFFFF", t.text_muted, size=17))
-            mon = int(self.demo_mon_combo.currentData() or 1)
-            self.statusBar().showMessage("Идёт HD-демонстрация экрана учителя всем ученикам")
-            _spawn_task(self.server.start_demo_broadcast(monitor=mon))
         else:
             self.btn_demo.setText("Демонстрация экрана")
             self.btn_demo.setProperty("accent", "primary")
             self.btn_demo.setIcon(_themed_icon("cast", "#FFFFFF", t.text_muted, size=17))
-            self.statusBar().showMessage("Демонстрация экрана остановлена", 4000)
-            _spawn_task(self.server.stop_demo_broadcast())
         self.btn_demo.style().unpolish(self.btn_demo)
         self.btn_demo.style().polish(self.btn_demo)
         self._update_toolbar_state()
+
+    def _start_demo_with_config(self, target_ids: list[str] | None = None) -> None:
+        mon = int(self.config.demo_monitor)
+        if self.demo_mon_combo.isVisible():
+            idx = self.demo_mon_combo.findData(mon)
+            if idx >= 0:
+                self.demo_mon_combo.setCurrentIndex(idx)
+        self._set_demo_button_state(
+            True,
+            target_count=len(target_ids) if target_ids is not None else None,
+        )
+        if target_ids is None:
+            self.statusBar().showMessage(
+                f"Идёт демонстрация экрана учителя всем ученикам ({self.config.demo_fps:.0f} FPS)"
+            )
+        else:
+            self.statusBar().showMessage(
+                f"Идёт демонстрация экрана учителя на выбранные ПК ({len(target_ids)} шт., {self.config.demo_fps:.0f} FPS)"
+            )
+        _spawn_task(
+            self.server.start_demo_broadcast(
+                fps=self.config.demo_fps,
+                width=self.config.demo_width,
+                quality=self.config.demo_quality,
+                fullscreen=self.config.demo_fullscreen,
+                title=self.config.demo_title or None,
+                monitor=mon,
+                target_ids=target_ids,
+            )
+        )
+
+    def _toggle_demo_broadcast(self, checked: bool) -> None:
+        if checked:
+            if self.demo_mon_combo.isVisible():
+                self.config.demo_monitor = int(
+                    self.demo_mon_combo.currentData()
+                    if self.demo_mon_combo.currentData() is not None
+                    else 1
+                )
+            self._start_demo_with_config(target_ids=None)
+        else:
+            self._set_demo_button_state(False)
+            self.statusBar().showMessage("Демонстрация экрана остановлена", 4000)
+            _spawn_task(self.server.stop_demo_broadcast())
+
+    def _open_demo_settings_dialog(self, preselected_ids: list[str] | None = None) -> None:
+        self._teacher_monitors = list_monitors()
+        online_sessions = sorted(
+            self.server.clients.values(),
+            key=lambda s: _natural_sort_key(s.display_name or s.hostname),
+        )
+        students = [
+            (
+                s.client_id,
+                f"{s.display_name or s.hostname} ({s.username} · {s.ip})"
+                + (f" [{s.classroom_id}]" if s.classroom_id else ""),
+            )
+            for s in online_sessions
+        ]
+        dlg = DemoBroadcastDialog(
+            self.config,
+            monitors=self._teacher_monitors,
+            students=students,
+            active=self.server.is_demo_active,
+            current_target_ids=self.server.demo_target_ids,
+            preselected_ids=preselected_ids,
+            parent=self,
+        )
+        if dlg.exec() != DemoBroadcastDialog.DialogCode.Accepted:
+            return
+        save_config(self.config_path, self.config)
+        idx = self.demo_mon_combo.findData(int(self.config.demo_monitor))
+        if idx >= 0:
+            self.demo_mon_combo.setCurrentIndex(idx)
+        if dlg.start_requested:
+            self._start_demo_with_config(target_ids=dlg.selected_target_ids)
+        else:
+            self.statusBar().showMessage("Настройки демонстрации сохранены", 3000)
 
     # ---------- Student Actions ----------
     def _open_selected_remote(self) -> None:
@@ -2202,6 +2305,10 @@ class TeacherMainWindow(QMainWindow):
     def _handle_card_action(self, client_id: str, action: str) -> None:
         if action == "control":
             self._open_remote_for(client_id)
+        elif action == "demo_single":
+            self._start_demo_with_config(target_ids=[client_id])
+        elif action == "demo_config":
+            self._open_demo_settings_dialog(preselected_ids=[client_id])
         elif action == "lock":
             _spawn_task(self.server.lock_screen(client_id, "срок бана: 1000 лет"))
         elif action == "unlock":

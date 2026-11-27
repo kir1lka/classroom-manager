@@ -6,13 +6,17 @@ from PySide6.QtCore import QSize, Qt
 from PySide6.QtWidgets import (
     QApplication,
     QCheckBox,
+    QComboBox,
     QDoubleSpinBox,
     QFormLayout,
     QHBoxLayout,
     QLabel,
     QLineEdit,
+    QListWidget,
+    QListWidgetItem,
     QMessageBox,
     QPushButton,
+    QRadioButton,
     QSpinBox,
     QVBoxLayout,
     QWidget,
@@ -765,4 +769,326 @@ class AddClassroomDialog(LiquidDialog):
             return
         self.created_room_id = rid
         self.created_secret = sec
+        self.accept()
+
+
+DEMO_PRESETS: list[tuple[str, float, int, int]] = [
+    ("HD Чёткий 15 FPS (1080p, 88%)", 15.0, 1920, 88),
+    ("Плавный 30 FPS (1080p, 78%)", 30.0, 1920, 78),
+    ("Игровой / Видео 60 FPS (720p, 72%)", 60.0, 1280, 72),
+    ("Ультра 1:1 (Оригинал, 10 FPS, 92%)", 10.0, 0, 92),
+    ("Настраиваемый (вручную)", -1.0, -1, -1),
+]
+
+
+class DemoBroadcastDialog(LiquidDialog):
+    """Liquid Glass dialog for configuring Teacher screen demonstration and selecting target PCs."""
+
+    def __init__(
+        self,
+        config: TeacherConfig,
+        monitors: list[dict],
+        students: list[tuple[str, str]],
+        active: bool = False,
+        current_target_ids: set[str] | None = None,
+        preselected_ids: list[str] | None = None,
+        parent=None,
+    ) -> None:
+        super().__init__(parent)
+        self.config = config
+        self._active = active
+        self.start_requested = False
+        self.selected_target_ids: list[str] | None = None
+
+        self.setWindowTitle("Настройка демонстрации экрана учителя")
+        self.setWindowIcon(make_app_icon("teacher"))
+        self.setMinimumWidth(560)
+        self.setModal(True)
+
+        tokens = get_tokens()
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(24, 22, 24, 20)
+        layout.setSpacing(14)
+
+        # Header
+        hdr = QHBoxLayout()
+        hdr.setSpacing(12)
+        badge = GlassFrame(variant="accent", radius=12)
+        badge.setFixedSize(40, 40)
+        b_lay = QVBoxLayout(badge)
+        b_lay.setContentsMargins(0, 0, 0, 0)
+        b_ico = QLabel()
+        b_ico.setPixmap(make_icon("cast", tokens.accent, 20).pixmap(20, 20))
+        b_ico.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        b_lay.addWidget(b_ico)
+        hdr.addWidget(badge)
+
+        hdr_text = QVBoxLayout()
+        hdr_text.setSpacing(2)
+        title = QLabel("Демонстрация экрана учителя")
+        title.setObjectName("DialogTitle")
+        sub = QLabel(
+            "Выберите, кому показывать экран (всему классу или отдельным ПК), и настройте качество эфира"
+        )
+        sub.setObjectName("MutedLabel")
+        sub.setWordWrap(True)
+        hdr_text.addWidget(title)
+        hdr_text.addWidget(sub)
+        hdr.addLayout(hdr_text, stretch=1)
+        layout.addLayout(hdr)
+
+        # Card 1: Target Audience (All vs Selected PCs)
+        tgt_card = GlassFrame(variant="card", radius=16)
+        tgt_v = QVBoxLayout(tgt_card)
+        tgt_v.setContentsMargins(18, 15, 18, 16)
+        tgt_v.setSpacing(10)
+        tgt_v.addLayout(
+            _make_card_header("monitor", "Кому показывать экран", f"Онлайн: {len(students)} ПК")
+        )
+
+        self.rb_all = QRadioButton("Всем ученикам в классе (новые ПК подключаются автоматически)")
+        self.rb_selected = QRadioButton("Только выбранным компьютерам:")
+        self.rb_all.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.rb_selected.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        use_selected = preselected_ids is not None or (active and current_target_ids is not None)
+        if use_selected:
+            self.rb_selected.setChecked(True)
+        else:
+            self.rb_all.setChecked(True)
+
+        tgt_v.addWidget(self.rb_all)
+        tgt_v.addWidget(self.rb_selected)
+
+        sel_tools = QHBoxLayout()
+        sel_tools.setSpacing(8)
+        self.btn_sel_all = QPushButton("Выбрать всех")
+        self.btn_sel_all.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_sel_all.clicked.connect(lambda: self._set_all_checked(True))
+        self.btn_sel_none = QPushButton("Снять выбор")
+        self.btn_sel_none.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_sel_none.clicked.connect(lambda: self._set_all_checked(False))
+        self.sel_count_lbl = QLabel("")
+        self.sel_count_lbl.setObjectName("MutedLabel")
+        sel_tools.addWidget(self.btn_sel_all)
+        sel_tools.addWidget(self.btn_sel_none)
+        sel_tools.addStretch()
+        sel_tools.addWidget(self.sel_count_lbl)
+        tgt_v.addLayout(sel_tools)
+
+        self.students_list = QListWidget()
+        self.students_list.setMinimumHeight(115)
+        self.students_list.setMaximumHeight(165)
+        checked_set: set[str] | None = None
+        if preselected_ids is not None:
+            checked_set = set(preselected_ids)
+        elif active and current_target_ids is not None:
+            checked_set = set(current_target_ids)
+
+        if not students:
+            empty_item = QListWidgetItem("Нет подключённых учеников онлайн")
+            empty_item.setFlags(Qt.ItemFlag.NoItemFlags)
+            self.students_list.addItem(empty_item)
+        else:
+            for cid, label in students:
+                item = QListWidgetItem(label)
+                item.setData(Qt.ItemDataRole.UserRole, cid)
+                item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
+                is_checked = checked_set is None or cid in checked_set
+                item.setCheckState(
+                    Qt.CheckState.Checked if is_checked else Qt.CheckState.Unchecked
+                )
+                self.students_list.addItem(item)
+
+        self.students_list.itemChanged.connect(lambda _it: self._update_sel_count())
+        tgt_v.addWidget(self.students_list)
+        layout.addWidget(tgt_card)
+
+        # Card 2: Stream Quality & Display Parameters
+        opt_card = GlassFrame(variant="card", radius=16)
+        opt_v = QVBoxLayout(opt_card)
+        opt_v.setContentsMargins(18, 15, 18, 16)
+        opt_v.setSpacing(10)
+        opt_v.addLayout(_make_card_header("settings", "Параметры трансляции"))
+
+        form = QFormLayout()
+        form.setHorizontalSpacing(14)
+        form.setVerticalSpacing(9)
+        form.setLabelAlignment(Qt.AlignmentFlag.AlignLeft | Qt.AlignmentFlag.AlignVCenter)
+
+        self.mon_combo = QComboBox()
+        for mon in monitors:
+            self.mon_combo.addItem(str(mon["name"]), int(mon["index"]))
+        if len(monitors) > 1:
+            self.mon_combo.addItem("Все мониторы сразу", 0)
+        saved_mon_idx = self.mon_combo.findData(int(config.demo_monitor))
+        if saved_mon_idx >= 0:
+            self.mon_combo.setCurrentIndex(saved_mon_idx)
+
+        self.preset_combo = QComboBox()
+        for name, _f, _w, _q in DEMO_PRESETS:
+            self.preset_combo.addItem(name)
+
+        self.fps_spin = QDoubleSpinBox()
+        self.fps_spin.setRange(1.0, 60.0)
+        self.fps_spin.setSingleStep(5.0)
+        self.fps_spin.setSuffix(" FPS")
+        self.fps_spin.setValue(float(config.demo_fps))
+
+        self.width_spin = QSpinBox()
+        self.width_spin.setRange(0, 3840)
+        self.width_spin.setSingleStep(160)
+        self.width_spin.setSpecialValueText("Оригинал 1:1")
+        self.width_spin.setSuffix(" px")
+        self.width_spin.setValue(int(config.demo_width))
+
+        self.quality_spin = QSpinBox()
+        self.quality_spin.setRange(40, 95)
+        self.quality_spin.setSingleStep(5)
+        self.quality_spin.setSuffix(" %")
+        self.quality_spin.setValue(int(config.demo_quality))
+
+        manual_row = QHBoxLayout()
+        manual_row.setSpacing(8)
+        manual_row.addWidget(self.fps_spin, stretch=1)
+        manual_row.addWidget(self.width_spin, stretch=1)
+        manual_row.addWidget(self.quality_spin, stretch=1)
+
+        self.fullscreen_check = QCheckBox(
+            "Полноэкранный режим у учеников (снять — открыть в окне, чтобы повторять параллельно)"
+        )
+        self.fullscreen_check.setChecked(bool(config.demo_fullscreen))
+        self.fullscreen_check.setCursor(Qt.CursorShape.PointingHandCursor)
+
+        self.title_edit = QLineEdit(config.demo_title or "")
+        self.title_edit.setPlaceholderText(
+            f"По умолчанию: Демонстрация экрана учителя ({config.classroom_id})"
+        )
+
+        form.addRow("Монитор учителя:", self.mon_combo)
+        form.addRow("Пресет качества:", self.preset_combo)
+        form.addRow("FPS / Ширина / JPEG:", manual_row)
+        form.addRow("Заголовок плашки:", self.title_edit)
+        opt_v.addLayout(form)
+        opt_v.addWidget(self.fullscreen_check)
+        layout.addWidget(opt_card)
+
+        # Match current values to a preset or "Custom"
+        self._sync_preset_from_spins()
+        self.preset_combo.currentIndexChanged.connect(self._on_preset_changed)
+
+        # Bottom Action Buttons
+        btn_row = QHBoxLayout()
+        btn_row.setSpacing(10)
+        btn_row.addStretch()
+
+        cancel_btn = QPushButton("Отмена")
+        cancel_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        cancel_btn.clicked.connect(self.reject)
+
+        save_only_btn = QPushButton("Сохранить настройки")
+        save_only_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        save_only_btn.clicked.connect(self._on_save_only)
+
+        start_label = "Применить к эфиру" if active else "Начать демонстрацию"
+        self.start_btn = QPushButton(start_label)
+        self.start_btn.setProperty("accent", "primary")
+        self.start_btn.setIcon(make_icon("cast", "#FFFFFF", 15))
+        self.start_btn.setIconSize(QSize(15, 15))
+        self.start_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.start_btn.setDefault(True)
+        self.start_btn.clicked.connect(self._on_start)
+
+        btn_row.addWidget(cancel_btn)
+        btn_row.addWidget(save_only_btn)
+        btn_row.addWidget(self.start_btn)
+        layout.addLayout(btn_row)
+
+        self.rb_all.toggled.connect(self._update_target_controls)
+        self.rb_selected.toggled.connect(self._update_target_controls)
+        self._update_target_controls()
+        self._update_sel_count()
+
+    def _sync_preset_from_spins(self) -> None:
+        cur = (round(self.fps_spin.value(), 1), self.width_spin.value(), self.quality_spin.value())
+        for idx, (_name, fps, width, qual) in enumerate(DEMO_PRESETS[:-1]):
+            if (round(fps, 1), width, qual) == cur:
+                self.preset_combo.setCurrentIndex(idx)
+                return
+        self.preset_combo.setCurrentIndex(len(DEMO_PRESETS) - 1)
+
+    def _on_preset_changed(self, idx: int) -> None:
+        if 0 <= idx < len(DEMO_PRESETS) - 1:
+            _name, fps, width, qual = DEMO_PRESETS[idx]
+            self.fps_spin.setValue(fps)
+            self.width_spin.setValue(width)
+            self.quality_spin.setValue(qual)
+
+    def _update_target_controls(self) -> None:
+        selective = self.rb_selected.isChecked()
+        self.students_list.setEnabled(selective)
+        self.btn_sel_all.setEnabled(selective)
+        self.btn_sel_none.setEnabled(selective)
+        self._update_sel_count()
+
+    def _set_all_checked(self, checked: bool) -> None:
+        state = Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+        self.students_list.blockSignals(True)
+        for i in range(self.students_list.count()):
+            it = self.students_list.item(i)
+            if it.data(Qt.ItemDataRole.UserRole):
+                it.setCheckState(state)
+        self.students_list.blockSignals(False)
+        self._update_sel_count()
+
+    def _checked_client_ids(self) -> list[str]:
+        ids: list[str] = []
+        for i in range(self.students_list.count()):
+            it = self.students_list.item(i)
+            cid = it.data(Qt.ItemDataRole.UserRole)
+            if cid and it.checkState() == Qt.CheckState.Checked:
+                ids.append(str(cid))
+        return ids
+
+    def _update_sel_count(self) -> None:
+        total = sum(
+            1
+            for i in range(self.students_list.count())
+            if self.students_list.item(i).data(Qt.ItemDataRole.UserRole)
+        )
+        if self.rb_all.isChecked():
+            self.sel_count_lbl.setText(f"Показ всем ({total} онлайн)")
+        else:
+            sel = len(self._checked_client_ids())
+            self.sel_count_lbl.setText(f"Выбрано: {sel} из {total}")
+
+    def _save_to_config(self) -> None:
+        self.config.demo_monitor = int(self.mon_combo.currentData() if self.mon_combo.currentData() is not None else 1)
+        self.config.demo_fps = float(self.fps_spin.value())
+        self.config.demo_width = int(self.width_spin.value())
+        self.config.demo_quality = int(self.quality_spin.value())
+        self.config.demo_fullscreen = self.fullscreen_check.isChecked()
+        self.config.demo_title = self.title_edit.text().strip()
+
+    def _on_save_only(self) -> None:
+        self._save_to_config()
+        self.start_requested = False
+        self.accept()
+
+    def _on_start(self) -> None:
+        if self.rb_selected.isChecked():
+            chosen = self._checked_client_ids()
+            if not chosen:
+                QMessageBox.warning(
+                    self,
+                    "Не выбраны компьютеры",
+                    "Отметьте хотя бы один компьютер ученика или выберите «Всем ученикам в классе».",
+                )
+                return
+            self.selected_target_ids = chosen
+        else:
+            self.selected_target_ids = None
+
+        self._save_to_config()
+        self.start_requested = True
         self.accept()

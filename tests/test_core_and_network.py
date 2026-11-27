@@ -556,3 +556,120 @@ async def test_multi_teacher_simultaneous_connection_and_monitor_cycle(tmp_path:
     finally:
         await s1.stop()
         await s2.stop()
+
+
+@pytest.mark.asyncio
+async def test_selective_demo_broadcast(tmp_path: Path) -> None:
+    secret = "DEMO-SELECTIVE-2026"
+    room = "VR-Demo"
+
+    t_cfg = TeacherConfig(
+        initialized=True,
+        password_hash=hash_password("1234"),
+        classroom_id=room,
+        class_secret=secret,
+        bind_host="127.0.0.1",
+        tcp_port=0,
+        discovery_enabled=False,
+        thumb_fps=0.0,
+        demo_fps=15.0,
+        demo_width=640,
+        demo_quality=70,
+        demo_fullscreen=False,
+        demo_title="Разбор примера",
+    )
+
+    connected_ids: list[str] = []
+    two_connected = asyncio.Event()
+
+    def _on_conn(sess) -> None:
+        connected_ids.append(sess.client_id)
+        if len(connected_ids) >= 2:
+            two_connected.set()
+
+    server = TeacherServer(t_cfg, tmp_path / "teacher", on_client_connected=_on_conn)
+    await server.start()
+
+    events_1: list[tuple[bool, str, bool]] = []
+    frames_1: list[int] = []
+    events_2: list[tuple[bool, str, bool]] = []
+    frames_2: list[int] = []
+    got_frame_1 = asyncio.Event()
+    got_stop_1 = asyncio.Event()
+
+    def _on_ctrl_1(active: bool, title: str, fs: bool) -> None:
+        events_1.append((active, title, fs))
+        if not active:
+            got_stop_1.set()
+
+    def _on_frame_1(data: bytes) -> None:
+        frames_1.append(len(data))
+        got_frame_1.set()
+
+    c1_cfg = StudentConfig(
+        initialized=True,
+        admin_password_hash=hash_password("1234"),
+        classroom_id=room,
+        class_secret=secret,
+        discovery_enabled=False,
+        manual_host=f"127.0.0.1:{server.bound_port}",
+        display_name="PC-One",
+    )
+    c2_cfg = StudentConfig(
+        initialized=True,
+        admin_password_hash=hash_password("1234"),
+        classroom_id=room,
+        class_secret=secret,
+        discovery_enabled=False,
+        manual_host=f"127.0.0.1:{server.bound_port}",
+        display_name="PC-Two",
+    )
+
+    c1 = StudentClient(
+        c1_cfg,
+        tmp_path / "c1" / "config.json",
+        CommandRouter(),
+        on_demo_control=_on_ctrl_1,
+        on_demo_frame=_on_frame_1,
+    )
+    c2 = StudentClient(
+        c2_cfg,
+        tmp_path / "c2" / "config.json",
+        CommandRouter(),
+        on_demo_control=lambda a, t, f: events_2.append((a, t, f)),
+        on_demo_frame=lambda d: frames_2.append(len(d)),
+    )
+    c1.start()
+    c2.start()
+
+    try:
+        await asyncio.wait_for(two_connected.wait(), timeout=6.0)
+        cid_one = next(
+            cid for cid, s in server.clients.items() if s.display_name == "PC-One"
+        )
+        # Start demo ONLY for PC-One
+        await server.start_demo_broadcast(
+            fps=15.0,
+            width=640,
+            quality=70,
+            fullscreen=False,
+            title="Разбор примера",
+            monitor=1,
+            target_ids=[cid_one],
+        )
+        await asyncio.wait_for(got_frame_1.wait(), timeout=5.0)
+        assert server.demo_target_ids == {cid_one}
+        assert (True, "Разбор примера", False) in events_1
+        assert len(frames_1) >= 1
+        # PC-Two must NOT have received demo frames or active control
+        assert not any(a for a, _t, _f in events_2)
+        assert len(frames_2) == 0
+
+        await server.stop_demo_broadcast()
+        await asyncio.wait_for(got_stop_1.wait(), timeout=4.0)
+        assert server.is_demo_active is False
+        assert server.demo_target_ids is None
+    finally:
+        await c1.stop()
+        await c2.stop()
+        await server.stop()
