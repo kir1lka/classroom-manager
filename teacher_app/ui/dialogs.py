@@ -518,8 +518,8 @@ class TeacherSettingsDialog(LiquidDialog):
         self.thumb_fps_spin.setValue(config.thumb_fps)
 
         self.live_fps_spin = QDoubleSpinBox()
-        self.live_fps_spin.setRange(1.0, 20.0)
-        self.live_fps_spin.setSingleStep(1.0)
+        self.live_fps_spin.setRange(1.0, 60.0)
+        self.live_fps_spin.setSingleStep(5.0)
         self.live_fps_spin.setSuffix(" кадр/с")
         self.live_fps_spin.setValue(config.live_fps)
 

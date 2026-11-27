@@ -55,6 +55,7 @@ class StudentSession:
     classroom_id: str = ""
     monitors: list[dict[str, Any]] = field(default_factory=list)
     active_monitor: int = 1
+    online: bool = True
     locked: bool = False
     active_window: str = ""
     connected_at: float = field(default_factory=time.time)
@@ -203,6 +204,11 @@ class TeacherServer:
         reader: asyncio.StreamReader,
         writer: asyncio.StreamWriter,
     ) -> None:
+        raw_sock = writer.get_extra_info("socket")
+        if raw_sock is not None:
+            with contextlib.suppress(OSError):
+                raw_sock.setsockopt(socket.IPPROTO_TCP, socket.TCP_NODELAY, 1)
+
         peer = writer.get_extra_info("peername") or ("unknown", 0)
         peer_ip = str(peer[0])
         session: StudentSession | None = None
@@ -508,6 +514,7 @@ class TeacherServer:
         width: int,
         quality: int = 85,
         monitor: int | None = None,
+        fast: bool | None = None,
     ) -> None:
         session = self.clients.get(client_id)
         if session is None:
@@ -515,6 +522,7 @@ class TeacherServer:
         session.screen_mode = mode
         if monitor is not None:
             session.active_monitor = int(monitor)
+        use_fast = bool(fast) if fast is not None else (float(fps) >= 24.0)
         try:
             async with session.write_lock:
                 await send_json(
@@ -526,10 +534,51 @@ class TeacherServer:
                         "width": int(width),
                         "quality": int(quality),
                         "monitor": int(session.active_monitor),
+                        "fast": use_fast,
                     },
                 )
         except Exception as exc:
             logger.debug("Failed to send SCREEN_CONTROL to %s: %s", client_id, exc)
+
+    async def cycle_student_monitor(self, client_id: str) -> int:
+        """Switch a student's active monitor to the next display (1 -> 2 -> ... -> 1) and update stream."""
+        session = self.clients.get(client_id)
+        if session is None:
+            return 1
+        mon_indices = [int(m.get("index", i)) for i, m in enumerate(session.monitors, start=1)]
+        if len(mon_indices) <= 1:
+            return session.active_monitor
+
+        if session.active_monitor in mon_indices:
+            nxt = mon_indices[(mon_indices.index(session.active_monitor) + 1) % len(mon_indices)]
+        else:
+            nxt = mon_indices[0]
+
+        session.active_monitor = nxt
+        if self.on_client_updated:
+            self.on_client_updated(session)
+
+        if session.screen_mode == ScreenMode.LIVE:
+            await self.set_screen_mode(
+                client_id,
+                ScreenMode.LIVE,
+                fps=self.config.live_fps,
+                width=self.config.live_width,
+                quality=self.config.live_quality,
+                monitor=nxt,
+            )
+        else:
+            mode = ScreenMode.THUMB if self.config.thumb_fps > 0 else ScreenMode.OFF
+            await self.set_screen_mode(
+                client_id,
+                mode,
+                fps=max(0.5, self.config.thumb_fps),
+                width=self.config.thumb_width,
+                quality=72,
+                monitor=nxt,
+                fast=False,
+            )
+        return nxt
 
     async def send_remote_input(self, client_id: str, event_payload: dict[str, Any]) -> None:
         session = self.clients.get(client_id)
@@ -682,7 +731,7 @@ class TeacherServer:
         self._demo_active = True
         self._demo_fullscreen = fullscreen
         self._demo_title = title or f"Демонстрация экрана учителя ({self.config.classroom_id})"
-        rate = max(1.0, min(20.0, float(fps if fps is not None else self.config.demo_fps)))
+        rate = max(1.0, min(60.0, float(fps if fps is not None else self.config.demo_fps)))
         target_w = int(width if width is not None else self.config.demo_width)
         target_q = int(quality if quality is not None else self.config.demo_quality)
 
@@ -711,13 +760,14 @@ class TeacherServer:
 
     async def _demo_broadcast_loop(self, fps: float, width: int, quality: int, monitor: int = 1) -> None:
         interval = 1.0 / fps
+        use_fast = fps >= 24.0
         while self._running and self._demo_active:
-            t0 = time.monotonic()
+            t0 = time.perf_counter()
             sessions = list(self.clients.values())
             if sessions:
                 try:
                     _w, _h, jpeg_bytes = await asyncio.to_thread(
-                        capture_screen_jpeg, width, quality, monitor
+                        capture_screen_jpeg, width, quality, monitor, use_fast
                     )
 
                     async def _push(sess: StudentSession) -> None:
@@ -731,5 +781,6 @@ class TeacherServer:
                 except Exception as exc:
                     logger.debug("Demo screen capture error: %s", exc)
 
-            elapsed = time.monotonic() - t0
-            await asyncio.sleep(max(0.03, interval - elapsed))
+            elapsed = time.perf_counter() - t0
+            sleep_for = interval - elapsed
+            await asyncio.sleep(sleep_for if sleep_for > 0.001 else 0)

@@ -1,20 +1,41 @@
-"""High-clarity off-thread multi-monitor screen capture and JPEG encoding."""
+"""High-speed off-thread multi-monitor screen capture and JPEG encoding (up to 60 FPS)."""
 
 from __future__ import annotations
 
 import io
+import threading
 from typing import Any
 
 import mss
 from PIL import Image, ImageDraw, ImageGrab
 
+# Persistent per-thread MSS instance eliminates Win32 CreateDC/DeleteDC overhead on every frame
+_THREAD_LOCAL = threading.local()
+
+
+def _get_mss() -> mss.MSS:
+    sct = getattr(_THREAD_LOCAL, "sct", None)
+    if sct is None:
+        sct = mss.MSS()
+        _THREAD_LOCAL.sct = sct
+    return sct
+
+
+def _reset_mss() -> None:
+    sct = getattr(_THREAD_LOCAL, "sct", None)
+    if sct is not None:
+        try:
+            sct.close()
+        except Exception:
+            pass
+        _THREAD_LOCAL.sct = None
+
 
 def list_monitors() -> list[dict[str, Any]]:
-    """Return metadata for all physical monitors (1..N) plus virtual desktop summary."""
+    """Return metadata for all physical monitors (1..N)."""
     result: list[dict[str, Any]] = []
     try:
         with mss.MSS() as sct:
-            # sct.monitors[0] is the combined virtual desktop; 1..N are individual displays
             for idx, mon in enumerate(sct.monitors[1:], start=1):
                 result.append(
                     {
@@ -46,15 +67,16 @@ def list_monitors() -> list[dict[str, Any]]:
 def get_monitor_rect(monitor_index: int = 1) -> tuple[int, int, int, int]:
     """Return (left, top, width, height) of the requested monitor (0 = all monitors)."""
     try:
-        with mss.MSS() as sct:
-            if monitor_index == 0:
-                m = sct.monitors[0]
-            elif 1 <= monitor_index < len(sct.monitors):
-                m = sct.monitors[monitor_index]
-            else:
-                m = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-            return int(m["left"]), int(m["top"]), int(m["width"]), int(m["height"])
+        sct = _get_mss()
+        if monitor_index == 0:
+            m = sct.monitors[0]
+        elif 1 <= monitor_index < len(sct.monitors):
+            m = sct.monitors[monitor_index]
+        else:
+            m = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+        return int(m["left"]), int(m["top"]), int(m["width"]), int(m["height"])
     except Exception:
+        _reset_mss()
         return 0, 0, 1920, 1080
 
 
@@ -71,27 +93,32 @@ def capture_screen_jpeg(
     target_width: int = 480,
     quality: int = 85,
     monitor_index: int = 1,
+    fast_mode: bool = False,
 ) -> tuple[int, int, bytes]:
-    """Capture the selected monitor and return (orig_width, orig_height, crisp_jpeg_bytes).
+    """Capture the selected monitor and return (orig_width, orig_height, jpeg_bytes).
 
-    Uses 4:4:4 chroma (subsampling=0) for high quality so text and UI stay razor sharp.
+    - Uses a persistent thread-local MSS context and native BGRX raw decoding (~3-4x faster).
+    - When `fast_mode=True` (for 30-60 FPS live control), uses BILINEAR + 4:2:0 for ultra-low latency.
+    - When `fast_mode=False` and `quality >= 80`, uses LANCZOS + 4:4:4 (subsampling=0) for razor-sharp text.
     """
     img: Image.Image | None = None
     orig_w, orig_h = 1920, 1080
 
-    # Tier 1: Fast mss.MSS capture on the chosen monitor (0 = all displays, 1..N = specific monitor)
+    # Tier 1: Persistent fast mss.MSS capture on the chosen monitor
     try:
-        with mss.MSS() as sct:
-            if monitor_index == 0:
-                monitor = sct.monitors[0]
-            elif 1 <= monitor_index < len(sct.monitors):
-                monitor = sct.monitors[monitor_index]
-            else:
-                monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
-            shot = sct.grab(monitor)
-            orig_w, orig_h = shot.size
-            img = Image.frombytes("RGB", shot.size, shot.rgb)
+        sct = _get_mss()
+        if monitor_index == 0:
+            monitor = sct.monitors[0]
+        elif 1 <= monitor_index < len(sct.monitors):
+            monitor = sct.monitors[monitor_index]
+        else:
+            monitor = sct.monitors[1] if len(sct.monitors) > 1 else sct.monitors[0]
+        shot = sct.grab(monitor)
+        orig_w, orig_h = shot.size
+        # Direct BGRX raw decode avoids mss's slower Python byte-slicing in shot.rgb
+        img = Image.frombytes("RGB", shot.size, shot.bgra, "raw", "BGRX")
     except Exception:
+        _reset_mss()
         img = None
 
     # Tier 2: Pillow ImageGrab fallback
@@ -112,13 +139,15 @@ def capture_screen_jpeg(
     elif target_width > 0 and orig_w > target_width:
         scale = target_width / float(orig_w)
         new_h = max(1, int(orig_h * scale))
-        # LANCZOS preserves crisp edges on UI text and code
-        resample = Image.Resampling.LANCZOS if target_width >= 720 else Image.Resampling.BILINEAR
+        resample = (
+            Image.Resampling.BILINEAR
+            if (fast_mode or target_width < 720)
+            else Image.Resampling.LANCZOS
+        )
         img = img.resize((target_width, new_h), resample)
 
     q = max(30, min(98, int(quality)))
-    # Disable chroma subsampling (4:4:4) for high-quality streams so small text never blurs
-    subsampling = 0 if q >= 80 else 2
+    subsampling = 2 if (fast_mode or q < 80) else 0
     buf = io.BytesIO()
     img.save(buf, format="JPEG", quality=q, subsampling=subsampling, optimize=False)
     return orig_w, orig_h, buf.getvalue()

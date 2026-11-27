@@ -485,3 +485,74 @@ def test_grid_sorting_and_custom_order(tmp_path: Path) -> None:
     assert loaded.grid_sort_mode == "custom"
     assert loaded.grid_card_width == 420
     assert loaded.grid_custom_order == {"vr1": ["c2", "c10"]}
+
+
+@pytest.mark.asyncio
+async def test_multi_teacher_simultaneous_connection_and_monitor_cycle(tmp_path: Path) -> None:
+    secret = "MULTI-TEACH-2026"
+    room = "VR-Multi"
+
+    t1_cfg = TeacherConfig(
+        initialized=True,
+        password_hash=hash_password("1234"),
+        classroom_id=room,
+        class_secret=secret,
+        bind_host="127.0.0.1",
+        tcp_port=0,
+        discovery_enabled=False,
+        thumb_fps=0.0,
+    )
+    t2_cfg = TeacherConfig(
+        initialized=True,
+        password_hash=hash_password("1234"),
+        classroom_id=room,
+        class_secret=secret,
+        bind_host="127.0.0.1",
+        tcp_port=0,
+        discovery_enabled=False,
+        thumb_fps=0.0,
+    )
+
+    c1_evt = asyncio.Event()
+    c2_evt = asyncio.Event()
+    s1 = TeacherServer(t1_cfg, tmp_path / "t1", on_client_connected=lambda _s: c1_evt.set())
+    s2 = TeacherServer(t2_cfg, tmp_path / "t2", on_client_connected=lambda _s: c2_evt.set())
+    await s1.start()
+    await s2.start()
+
+    try:
+        # Student configured with two teachers simultaneously (comma-separated manual hosts)
+        stu_cfg = StudentConfig(
+            initialized=True,
+            admin_password_hash=hash_password("1234"),
+            classroom_id=room,
+            class_secret=secret,
+            discovery_enabled=False,
+            manual_host=f"127.0.0.1:{s1.bound_port}, 127.0.0.1:{s2.bound_port}",
+            display_name="PC-Dual",
+        )
+        client = StudentClient(stu_cfg, tmp_path / "stu" / "config.json", CommandRouter())
+        client.start()
+        try:
+            await asyncio.wait_for(asyncio.gather(c1_evt.wait(), c2_evt.wait()), timeout=6.0)
+            assert len(s1.clients) == 1
+            assert len(s2.clients) == 1
+            cid = next(iter(s1.clients.keys()))
+
+            # Verify fast 60 FPS capture mode
+            w, h, jpg = capture_screen_jpeg(target_width=1280, quality=75, monitor_index=1, fast_mode=True)
+            assert w > 0 and h > 0 and jpg.startswith(b"\xff\xd8")
+
+            # Verify monitor cycling helper
+            s1.clients[cid].monitors = [
+                {"index": 1, "name": "Монитор 1 (1920×1080)"},
+                {"index": 2, "name": "Монитор 2 (1920×1080)"},
+            ]
+            assert await s1.cycle_student_monitor(cid) == 2
+            assert s1.clients[cid].active_monitor == 2
+            assert await s1.cycle_student_monitor(cid) == 1
+        finally:
+            await client.stop()
+    finally:
+        await s1.stop()
+        await s2.stop()

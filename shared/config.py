@@ -42,6 +42,7 @@ class TeacherConfig:
     grid_sort_mode: str = "natural_asc"
     grid_card_width: int = 326
     grid_custom_order: dict[str, list[str]] = field(default_factory=dict)
+    known_students: dict[str, dict[str, str]] = field(default_factory=dict)
     thumb_fps: float = 1.0
     live_fps: float = 12.0
     thumb_width: int = 480

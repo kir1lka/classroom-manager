@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import re
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from PySide6.QtCore import QMimeData, QObject, QPoint, QRectF, QSize, Qt, Signal
@@ -164,10 +165,12 @@ class StudentCardWidget(GlassFrame):
     double_clicked = Signal(str)
     context_action = Signal(str, str)
     card_reordered = Signal(str, str)
+    monitor_cycled = Signal(str)
 
     def __init__(self, session: StudentSession, card_width: int = CARD_DEFAULT_WIDTH, parent=None) -> None:
         super().__init__(variant="card", radius=18.0, interactive=True, parent=parent)
         self.client_id = session.client_id
+        self._online = bool(session.online)
         self._locked = bool(session.locked)
         self._search_blob = ""
         self._last_session = session
@@ -192,15 +195,26 @@ class StudentCardWidget(GlassFrame):
         title_font.setBold(True)
         self.title_lbl.setFont(title_font)
 
-        self.mon_lbl = QLabel("")
-        self.mon_lbl.setObjectName("MonBadge")
-        self.mon_lbl.setVisible(False)
+        self.mon_btn = QPushButton("Экран 1")
+        self.mon_btn.setObjectName("IconPill")
+        self.mon_btn.setFixedHeight(24)
+        self.mon_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.mon_btn.setStyleSheet(
+            "QPushButton {"
+            "  min-height: 22px; max-height: 24px;"
+            "  padding: 0px 9px; border-radius: 10px;"
+            "  font-size: 11px; font-weight: 700;"
+            "}"
+        )
+        self.mon_btn.setToolTip("Нажмите, чтобы переключить монитор ученика прямо в миниатюре")
+        self.mon_btn.clicked.connect(lambda: self.monitor_cycled.emit(self.client_id))
+        self.mon_btn.setVisible(False)
 
         self.badge_lbl = QLabel("ONLINE")
         self.badge_lbl.setObjectName("OnlineBadge")
 
         top.addWidget(self.title_lbl, stretch=1)
-        top.addWidget(self.mon_lbl)
+        top.addWidget(self.mon_btn)
         top.addWidget(self.badge_lbl)
         layout.addLayout(top)
 
@@ -315,26 +329,43 @@ class StudentCardWidget(GlassFrame):
 
     def update_session(self, session: StudentSession) -> None:
         self._last_session = session
-        self._locked = bool(session.locked)
+        self._online = bool(session.online)
+        self._locked = bool(session.locked) and self._online
         self._search_blob = (
             f"{session.label} {session.hostname} {session.username} {session.ip} {session.active_window}"
         ).lower()
         self._update_elided_texts(session)
 
         mon_count = len(session.monitors)
-        if mon_count > 1:
-            self.mon_lbl.setText(f"{mon_count} мон.")
-            self.mon_lbl.setVisible(True)
+        if self._online and mon_count > 1:
+            active_mon = int(session.active_monitor or 1)
+            self.mon_btn.setText("Все экраны" if active_mon == 0 else f"Экран {active_mon}")
+            self.mon_btn.setToolTip(
+                f"Мониторов на ПК: {mon_count}. Нажмите, чтобы переключить экран в миниатюре."
+            )
+            self.mon_btn.setVisible(True)
         else:
-            self.mon_lbl.setVisible(False)
+            self.mon_btn.setVisible(False)
 
-        self.setProperty("locked", "true" if session.locked else "false")
-        if session.locked:
+        self.quick_remote_btn.setEnabled(self._online)
+        self.quick_lock_btn.setEnabled(self._online)
+
+        self.setProperty("locked", "true" if self._locked else "false")
+        if not self._online:
+            self.badge_lbl.setText("OFFLINE")
+            self.badge_lbl.setObjectName("MonBadge")
+            self._last_pixmap = None
+            self.preview_lbl.setPixmap(QPixmap())
+            self.preview_lbl.setText("Компьютер выключен (OFFLINE)")
+            self.window_lbl.setText("Нет подключения")
+        elif session.locked:
             self.badge_lbl.setText("БЛОК")
             self.badge_lbl.setObjectName("BanBadge")
         else:
             self.badge_lbl.setText("ONLINE")
             self.badge_lbl.setObjectName("OnlineBadge")
+            if self._last_pixmap is None:
+                self.preview_lbl.setText("Ожидание кадра...")
 
         self.refresh_theme_icons()
         self.badge_lbl.style().unpolish(self.badge_lbl)
@@ -440,20 +471,27 @@ class StudentCardWidget(GlassFrame):
         self.clicked.emit(self.client_id)
         t = get_tokens()
         menu = QMenu(self)
-        actions = [
-            ("control", "remote", t.accent, "Открыть HD-управление ПК"),
-            ("lock", "lock", t.danger, "Заблокировать экран"),
-            ("unlock", "unlock", t.success, "Разблокировать экран"),
-            ("send_file", "send_file", t.text, "Отправить файлы на этот ПК..."),
-            ("message", "message", t.text, "Отправить сообщение"),
-            ("powershell", "terminal", t.text, "Открыть PowerShell для этого ПК"),
-            ("ping", "pulse", t.text, "Пинг и системная информация"),
-            ("sep", "", "", ""),
-            ("power_lock_os", "lock", t.warning, "Питание: Заблокировать Windows"),
-            ("power_reboot", "refresh", t.warning, "Питание: Перезагрузить ПК"),
-            ("power_shutdown", "power", t.danger, "Питание: Выключить ПК"),
-            ("power_cancel", "stop", t.text_secondary, "Питание: Отменить выключение"),
-        ]
+        if self._online:
+            actions = [
+                ("control", "remote", t.accent, "Открыть HD-управление ПК"),
+                ("lock", "lock", t.danger, "Заблокировать экран"),
+                ("unlock", "unlock", t.success, "Разблокировать экран"),
+                ("send_file", "send_file", t.text, "Отправить файлы на этот ПК..."),
+                ("message", "message", t.text, "Отправить сообщение"),
+                ("powershell", "terminal", t.text, "Открыть PowerShell для этого ПК"),
+                ("ping", "pulse", t.text, "Пинг и системная информация"),
+                ("sep", "", "", ""),
+                ("power_lock_os", "lock", t.warning, "Питание: Заблокировать Windows"),
+                ("power_reboot", "refresh", t.warning, "Питание: Перезагрузить ПК"),
+                ("power_shutdown", "power", t.danger, "Питание: Выключить ПК"),
+                ("power_cancel", "stop", t.text_secondary, "Питание: Отменить выключение"),
+                ("sep", "", "", ""),
+                ("remove_known", "trash", t.danger, "Удалить ПК из списка"),
+            ]
+        else:
+            actions = [
+                ("remove_known", "trash", t.danger, "Удалить ПК из списка"),
+            ]
         for key, icon_name, col, label in actions:
             if key == "sep":
                 menu.addSeparator()
@@ -506,10 +544,12 @@ class TeacherMainWindow(QMainWindow):
         )
 
         self.cards: dict[str, StudentCardWidget] = {}
+        self._offline_sessions: dict[str, StudentSession] = {}
         self.selected_client_id: str | None = None
         self.remote_dialogs: dict[str, RemoteControlDialog] = {}
 
         self._build_ui()
+        self._load_known_students_as_offline()
         self._connect_signals()
 
     def showEvent(self, event) -> None:
@@ -1633,16 +1673,120 @@ class TeacherMainWindow(QMainWindow):
             card.set_card_width(w)
         self._relayout_grid()
 
+    def _on_card_monitor_cycled(self, client_id: str) -> None:
+        _spawn_task(self._cycle_monitor_async(client_id))
+
+    async def _cycle_monitor_async(self, client_id: str) -> None:
+        nxt = await self.server.cycle_student_monitor(client_id)
+        sess = self.server.clients.get(client_id)
+        if sess is not None:
+            self.statusBar().showMessage(f"{sess.label}: переключено на Экран {nxt}", 3000)
+
+    def _visible_grid_sessions(self) -> dict[str, StudentSession]:
+        """Return ONLINE + persisted OFFLINE student sessions for the currently selected classroom."""
+        combined: dict[str, StudentSession] = {}
+        target = self._room_filter.strip().lower()
+        all_rooms = self._room_filter == "__ALL_ROOMS__"
+
+        for cid, s in self._offline_sessions.items():
+            if cid in self.server.clients:
+                continue
+            if all_rooms or not s.classroom_id or s.classroom_id.strip().lower() == target:
+                combined[cid] = s
+
+        for cid, s in self._active_clients().items():
+            combined[cid] = s
+        return combined
+
+    def _make_offline_session(self, client_id: str, meta: dict[str, str]) -> StudentSession:
+        return StudentSession(
+            client_id=client_id,
+            hostname=str(meta.get("hostname") or client_id),
+            display_name=str(meta.get("display_name") or ""),
+            username=str(meta.get("username") or ""),
+            os_info=str(meta.get("os_info") or "Windows"),
+            ip=str(meta.get("ip") or "—"),
+            screen_width=1920,
+            screen_height=1080,
+            writer=SimpleNamespace(),  # type: ignore[arg-type]
+            classroom_id=str(meta.get("classroom_id") or self.config.classroom_id),
+            online=False,
+            locked=False,
+            active_window="Нет подключения",
+        )
+
+    def _load_known_students_as_offline(self) -> None:
+        card_w = max(CARD_MIN_WIDTH, min(CARD_MAX_WIDTH, int(self.config.grid_card_width or CARD_DEFAULT_WIDTH)))
+        for cid, meta in list(self.config.known_students.items()):
+            if not isinstance(meta, dict):
+                continue
+            off_sess = self._make_offline_session(cid, meta)
+            self._offline_sessions[cid] = off_sess
+            card = StudentCardWidget(off_sess, card_width=card_w)
+            card.clicked.connect(self._select_client)
+            card.double_clicked.connect(self._open_remote_for)
+            card.context_action.connect(self._handle_card_action)
+            card.card_reordered.connect(self._on_card_reordered)
+            card.monitor_cycled.connect(self._on_card_monitor_cycled)
+            self.cards[cid] = card
+        if self.cards:
+            self._relayout_grid()
+            self._update_toolbar_state()
+
+    def _remember_student(self, session: StudentSession) -> None:
+        self.config.known_students[session.client_id] = {
+            "hostname": session.hostname,
+            "display_name": session.display_name,
+            "username": session.username,
+            "os_info": session.os_info,
+            "ip": session.ip,
+            "classroom_id": session.classroom_id or self.config.classroom_id,
+        }
+        save_config(self.config_path, self.config)
+
+    def _remove_student_from_list(self, client_id: str) -> None:
+        self.config.known_students.pop(client_id, None)
+        for room_key, order in list(self.config.grid_custom_order.items()):
+            if client_id in order:
+                self.config.grid_custom_order[room_key] = [c for c in order if c != client_id]
+        save_config(self.config_path, self.config)
+
+        self._offline_sessions.pop(client_id, None)
+        card = self.cards.pop(client_id, None)
+        if card is not None:
+            card.setParent(None)
+            card.deleteLater()
+
+        dlg = self.remote_dialogs.pop(client_id, None)
+        if dlg is not None:
+            dlg.close()
+
+        # If currently online, close socket; if student agent is still running it may reconnect
+        sess = self.server.clients.get(client_id)
+        if sess is not None:
+            _spawn_task(self.server._close_session(sess))
+
+        if self.selected_client_id == client_id:
+            self.selected_client_id = next(iter(self._visible_grid_sessions().keys()), None)
+            if self.selected_client_id:
+                self._select_client(self.selected_client_id)
+
+        self._relayout_grid()
+        self._refresh_header_labels()
+        self._refresh_ps_targets()
+        self._update_toolbar_state()
+        self.statusBar().showMessage("Компьютер удалён из списка класса", 3500)
+
     def _on_card_reordered(self, source_id: str, target_id: str) -> None:
         if source_id == target_id:
             return
-        active = self._active_clients()
-        if source_id not in active or target_id not in active:
+        visible = self._visible_grid_sessions()
+        if source_id not in visible or target_id not in visible:
             return
 
         room_key = self._current_order_room_key()
         current_sorted = sort_sessions(
-            list(active.values()),
+            list(visible.values()),
             self.config.grid_sort_mode,
             self.config.grid_custom_order.get(room_key),
         )
@@ -1672,12 +1816,12 @@ class TeacherMainWindow(QMainWindow):
         while self.grid_layout.count():
             self.grid_layout.takeAt(0)
 
-        active = self._active_clients()
+        visible = self._visible_grid_sessions()
         for cid, card in self.cards.items():
-            if cid not in active:
+            if cid not in visible:
                 card.setVisible(False)
 
-        if not active:
+        if not visible:
             self.empty_state_wrap.setVisible(True)
             self.no_match_lbl.setVisible(False)
             self.scroll_area.setVisible(False)
@@ -1687,7 +1831,7 @@ class TeacherMainWindow(QMainWindow):
         query = self.search_input.text().strip().lower()
         room_key = self._current_order_room_key()
         ordered_sessions = sort_sessions(
-            list(active.values()),
+            list(visible.values()),
             self.config.grid_sort_mode,
             self.config.grid_custom_order.get(room_key),
         )
@@ -1726,6 +1870,10 @@ class TeacherMainWindow(QMainWindow):
             self._relayout_grid()
 
     def _on_client_connected(self, session: StudentSession) -> None:
+        session.online = True
+        self._offline_sessions.pop(session.client_id, None)
+        self._remember_student(session)
+
         card = self.cards.get(session.client_id)
         card_w = max(CARD_MIN_WIDTH, min(CARD_MAX_WIDTH, int(self.config.grid_card_width or CARD_DEFAULT_WIDTH)))
         if card is None:
@@ -1734,6 +1882,7 @@ class TeacherMainWindow(QMainWindow):
             card.double_clicked.connect(self._open_remote_for)
             card.context_action.connect(self._handle_card_action)
             card.card_reordered.connect(self._on_card_reordered)
+            card.monitor_cycled.connect(self._on_card_monitor_cycled)
             self.cards[session.client_id] = card
         else:
             card.set_card_width(card_w)
@@ -1748,19 +1897,27 @@ class TeacherMainWindow(QMainWindow):
         self._update_toolbar_state()
 
     def _on_client_disconnected(self, client_id: str) -> None:
-        card = self.cards.pop(client_id, None)
-        if card is not None:
-            card.setParent(None)
-            card.deleteLater()
-
         dlg = self.remote_dialogs.pop(client_id, None)
         if dlg is not None:
             dlg.close()
 
-        if self.selected_client_id == client_id:
-            self.selected_client_id = next(iter(self.cards.keys()), None)
-            if self.selected_client_id:
-                self._select_client(self.selected_client_id)
+        meta = self.config.known_students.get(client_id)
+        if meta is not None:
+            # Keep card visible in OFFLINE state so shut-down PCs remain in the classroom grid
+            off_sess = self._make_offline_session(client_id, meta)
+            self._offline_sessions[client_id] = off_sess
+            card = self.cards.get(client_id)
+            if card is not None:
+                card.update_session(off_sess)
+        else:
+            card = self.cards.pop(client_id, None)
+            if card is not None:
+                card.setParent(None)
+                card.deleteLater()
+            if self.selected_client_id == client_id:
+                self.selected_client_id = next(iter(self._visible_grid_sessions().keys()), None)
+                if self.selected_client_id:
+                    self._select_client(self.selected_client_id)
 
         self._relayout_grid()
         self._refresh_header_labels()
@@ -2070,6 +2227,8 @@ class TeacherMainWindow(QMainWindow):
             self._trigger_power("shutdown", False, client_id)
         elif action == "power_cancel":
             self._trigger_power("cancel_shutdown", False, client_id)
+        elif action == "remove_known":
+            self._remove_student_from_list(client_id)
 
     def _run_on_selected(self, action: str) -> None:
         if self.selected_client_id:

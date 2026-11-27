@@ -66,10 +66,11 @@ QT_KEY_TO_VK: dict[int, int] = {
     int(Qt.Key.Key_F12): 0x7B,
 }
 
-QUALITY_PRESETS: list[tuple[str, int, int, float]] = [
-    ("HD Чёткое (1080p, 88%)", 1920, 88, 12.0),
-    ("Ультра 1:1 (Оригинал, 95%)", 0, 95, 10.0),
-    ("Быстрое (720p, 75%)", 1280, 75, 14.0),
+QUALITY_PRESETS: list[tuple[str, int, int, float, bool]] = [
+    ("Плавный 60 FPS (1080p, 78%)", 1920, 78, 60.0, True),
+    ("Игровой 60 FPS (720p, 75%)", 1280, 75, 60.0, True),
+    ("HD Чёткий 30 FPS (1080p, 88%)", 1920, 88, 30.0, False),
+    ("Ультра 1:1 (Оригинал, 95%)", 0, 95, 15.0, False),
 ]
 
 
@@ -81,6 +82,7 @@ class RemoteScreenCanvas(QLabel):
         self._on_input = on_input
         self._control_enabled = False
         self._monitor_index = 1
+        self._fast_render = True
         self._source_pixmap: QPixmap | None = None
         self._image_rect = QRect()
         self._last_move_ts = 0.0
@@ -118,13 +120,21 @@ class RemoteScreenCanvas(QLabel):
         super().resizeEvent(event)
         self._render_scaled()
 
+    def set_fast_render(self, fast: bool) -> None:
+        self._fast_render = bool(fast)
+
     def _render_scaled(self) -> None:
         if self._source_pixmap is None or self._source_pixmap.isNull():
             return
+        mode = (
+            Qt.TransformationMode.FastTransformation
+            if self._fast_render
+            else Qt.TransformationMode.SmoothTransformation
+        )
         scaled = self._source_pixmap.scaled(
             self.size(),
             Qt.AspectRatioMode.KeepAspectRatio,
-            Qt.TransformationMode.SmoothTransformation,
+            mode,
         )
         x = (self.width() - scaled.width()) // 2
         y = (self.height() - scaled.height()) // 2
@@ -156,7 +166,7 @@ class RemoteScreenCanvas(QLabel):
         if not self._control_enabled:
             return
         now = time.monotonic()
-        if now - self._last_move_ts < 0.03:
+        if now - self._last_move_ts < 0.014:
             return
         coords = self._map_pos(event.position())
         if coords is not None:
@@ -322,12 +332,12 @@ class RemoteControlDialog(LiquidDialog):
         self.monitor_combo.currentIndexChanged.connect(self._apply_stream_settings)
         bar.addWidget(self.monitor_combo)
 
-        # Compact Quality selector
+        # Compact Quality selector (up to 60 FPS)
         self.quality_combo = QComboBox()
-        self.quality_combo.setMinimumWidth(175)
-        self.quality_combo.setToolTip("Качество и частота видеопотока")
-        for label, w, q, fps in QUALITY_PRESETS:
-            self.quality_combo.addItem(label, (w, q, fps))
+        self.quality_combo.setMinimumWidth(210)
+        self.quality_combo.setToolTip("Качество и частота видеопотока (до 60 FPS)")
+        for label, w, q, fps, fast in QUALITY_PRESETS:
+            self.quality_combo.addItem(label, (w, q, fps, fast))
         self.quality_combo.currentIndexChanged.connect(self._apply_stream_settings)
         bar.addWidget(self.quality_combo)
 
@@ -424,13 +434,15 @@ class RemoteControlDialog(LiquidDialog):
         )
         preset = self.quality_combo.currentData()
         if preset:
-            width, quality, fps = preset
+            width, quality, fps, fast = preset
         else:
             width = self.server.config.live_width
             quality = self.server.config.live_quality
             fps = self.server.config.live_fps
+            fast = fps >= 24.0
 
         self.canvas.set_monitor_index(mon_idx)
+        self.canvas.set_fast_render(fast)
         asyncio.create_task(
             self.server.set_screen_mode(
                 self.client_id,
@@ -439,6 +451,7 @@ class RemoteControlDialog(LiquidDialog):
                 width=width,
                 quality=quality,
                 monitor=mon_idx,
+                fast=fast,
             )
         )
 

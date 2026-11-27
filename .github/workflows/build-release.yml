@@ -53,11 +53,24 @@ jobs:
             --exclude-module PySide6.QtPdf --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick `
             student_app/main.py
 
+      - name: Build ClassroomManagerSetup.exe (Unified Installer)
+        run: |
+          pyinstaller --noconfirm --clean --onefile --windowed --name ClassroomManagerSetup --paths . `
+            --icon assets/teacher.ico --add-data "assets;assets" `
+            --add-data "scripts/setup_firewall.ps1;payload" `
+            --add-binary "dist/ClassroomTeacher.exe;payload" `
+            --add-binary "dist/ClassroomStudent.exe;payload" `
+            --hidden-import cryptography `
+            --exclude-module PySide6.QtWebEngineCore --exclude-module PySide6.QtWebEngineWidgets `
+            --exclude-module PySide6.QtPdf --exclude-module PySide6.QtQml --exclude-module PySide6.QtQuick `
+            installer_app/main.py
+
       - name: Upload build artifacts
         uses: actions/upload-artifact@v4
         with:
           name: ClassroomManager-Windows-EXE
           path: |
+            dist/ClassroomManagerSetup.exe
             dist/ClassroomTeacher.exe
             dist/ClassroomStudent.exe
             scripts/setup_firewall.ps1
@@ -70,6 +83,7 @@ jobs:
           body_path: docs/RELEASE_NOTES.md
           generate_release_notes: true
           files: |
+            dist/ClassroomManagerSetup.exe
             dist/ClassroomTeacher.exe
             dist/ClassroomStudent.exe
             scripts/setup_firewall.ps1
